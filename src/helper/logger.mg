@@ -3,13 +3,14 @@ mod logger
 use "std:writer" as wr
 use "std:io" as io
 
-pub alias LogLevel = u8
-
-pub const LVL_DEBUG LogLevel = 0
-pub const LVL_DEFAULT LogLevel = 1
-pub const LVL_WARNING LogLevel = 2
-pub const LVL_ERROR LogLevel = 3
-pub const LVL_CRITICAL LogLevel = 4
+pub enum LogLevel u8(
+    VERBOSE=0
+    DEBUG
+    DEFAULT
+    WARNING
+    ERROR
+    CRITICAL
+)
 
 pub Logger(
     level LogLevel
@@ -24,19 +25,19 @@ pub new(writer wr.Writer, lvl LogLevel) Logger:
 ..
 
 Logger.log(text str) void:
-    this.logLvl(text, LVL_DEFAULT)
+    this.logLvl(text, LogLevel.DEFAULT)
 ..
 
 Logger.logLn(text str) void:
-    this.logLnLvl(text, LVL_DEFAULT)
+    this.logLnLvl(text, LogLevel.DEFAULT)
 ..
 
 Logger.debug(text str) void:
-    this.logLvl(text, LVL_DEBUG)
+    this.logLvl(text, LogLevel.DEBUG)
 ..
 
 Logger.debugLn(text str) void:
-    this.logLnLvl(text, LVL_DEBUG)
+    this.logLnLvl(text, LogLevel.DEBUG)
 ..
 
 Logger.logLvl(text str, level LogLevel) void:

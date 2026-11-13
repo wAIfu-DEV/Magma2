@@ -17,7 +17,7 @@ pub enum Severity u8(
     _END,
 )
 
-global SevToRepr := array str[Severity._END](
+global SevToRepr := [Severity._END]str(
     Severity.INFO="INFO"
     Severity.WARNING="WARN"
     Severity.ERROR="ERROR"

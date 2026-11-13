@@ -54,9 +54,16 @@ pub Decl(
 
 pub union DeclKind(
     Variable(name str, type nt.Type*)
-    Argument(name str, type nt.Type*)
+    Argument(name str, type nt.Type*, boundedCount str)
     Function(name str, returnType nt.Type*)
     Struct(name str)
+    Alias(name str, target nt.Type*)
+    Union(name str)
+    Enum(name str, backing nt.Type*)
+    Proto(name str)
+    Field(name str, type nt.Type*)
+    UnionVariant(name str)
+    EnumVariant(name str, type nt.Type*)
 )
 
 Resolver(
@@ -105,7 +112,9 @@ getModuleLocked(id ModuleId) !Module*:
 pub registerModule(absPath str) !Module*:
     scopes := try ls.new[Scope](ctx.alloc, none)
     decls := try ls.new[Decl](ctx.alloc, none)
-    names := try hm.new[DeclId](64, none)
+    # Module-wide declarations can be numerous; keep this registry sized for
+    # its larger working set. Individual scopes use the small-map default.
+    names := try hm.new[DeclId](8, none)
 
     resolverData.modulesLock.writeLock()
     defer resolverData.modulesLock.writeUnlock()
@@ -127,10 +136,10 @@ getScopeLocked(module Module*, id ScopeId) !Scope*:
     if id == 0:
         throw "tried to access scope but its ID is empty"
     ..
-    if id >= module.scopes.count():
+    if id > module.scopes.count():
         throw "tried to access scope outside of bounds"
     ..
-    ret try module.scopes.get(id)
+    ret try module.scopes.get(id - 1)
 ..
 
 Module.getScope(id ScopeId) !Scope*:
@@ -142,16 +151,20 @@ Module.getScope(id ScopeId) !Scope*:
 ..
 
 registerScope(module Module*, parentId ScopeId, kind ScopeKind) !Scope*:
-    names := try hm.new[DeclId](64, none)
+    names := try hm.new[DeclId](2, none)
 
     module.scopesLock.writeLock()
     defer module.scopesLock.writeUnlock()
 
-    id := module.scopes.count()
+    id := module.scopes.count() + 1
+    parent Scope* = none
+    if parentId != 0:
+        parent = try getScopeLocked(module, parentId)
+    ..
     try module.scopes.push(Scope(
         id=id,
         module=module,
-        parentScope=none,
+        parentScope=parent,
         owner=Owner(module=module.id, scope=parentId),
         kind=kind,
         names=move names,
@@ -168,10 +181,10 @@ getDeclLocked(module Module*, id DeclId) !Decl*:
     if id == 0:
         throw "tried to access decl but its ID is empty"
     ..
-    if id >= module.decls.count():
+    if id > module.decls.count():
         throw "tried to access decl outside of bounds"
     ..
-    ret try module.decls.get(id)
+    ret try module.decls.get(id - 1)
 ..
 
 Module.getDecl(id DeclId) !Decl*:
@@ -183,20 +196,27 @@ Module.getDecl(id DeclId) !Decl*:
 ..
 
 registerDeclLocked(module Module*, name str, scope ScopeId, kind DeclKind) !Decl*:
-    id := module.decls.count()
+    id := module.decls.count() + 1
     try module.decls.push(Decl(
         id=id,
         owner=Owner(module=module.id, scope=scope),
         kind=kind,
     ))
 
-    if true:
+    if scope == 0:
         module.namesLock.writeLock()
         defer module.namesLock.writeUnlock()
         try module.names.set(name, id)
+    else:
+        module.scopesLock.readLock()
+        scopeNode := try getScopeLocked(module, scope)
+        module.scopesLock.readUnlock()
+        scopeNode.namesLock.writeLock()
+        defer scopeNode.namesLock.writeUnlock()
+        try scopeNode.names.set(name, id)
     ..
 
-    ret try module.decls.get(id)
+    ret try module.decls.get(id - 1)
 ..
 
 Module.registerDecl(name str, kind DeclKind) !Decl*:
@@ -208,7 +228,7 @@ Module.registerDecl(name str, kind DeclKind) !Decl*:
 
 Module.registerScopeDecl(name str, scope ScopeId, kind DeclKind) !Decl*:
     this.scopesLock.readLock()
-    validScope := scope < this.scopes.count()
+    validScope := scope != 0 && scope <= this.scopes.count()
     this.scopesLock.readUnlock()
     if not validScope:
         throw "tried to register a declaration in an unknown scope"
@@ -243,12 +263,17 @@ Scope.registerScope(kind ScopeKind) !Scope*:
 ..
 
 Scope.getDeclFromName(name str) !Decl*:
-    id DeclId
-
-    if true:
-        this.namesLock.readLock()
-        defer this.namesLock.readUnlock()
-        id = try this.names.get(name)
+    scope := this
+    loop scope != none:
+        scope.namesLock.readLock()
+        id, err := scope.names.indexOf(name)
+        if err.ok():
+            id = try scope.names.get(name)
+            scope.namesLock.readUnlock()
+            ret try this.module.getDecl(id)
+        ..
+        scope.namesLock.readUnlock()
+        scope = scope.parentScope
     ..
-    ret try this.getDecl(id)
+    ret try this.module.getDeclFromName(name)
 ..

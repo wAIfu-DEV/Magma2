@@ -9,10 +9,12 @@ use "std:slices" slc
 use "std:fmt" fmt
 use "std:footgun" fg
 
+use "shared/global" gl
 use "shared/token_types" tkt
 use "shared/filectx" fctx
 use "shared/comperr" comperr
 use "shared/origin" org
+use "helper/logger" log
 
 enum LxMode u8(
     DEFAULT=0
@@ -96,7 +98,7 @@ Lexer.appendSourceBytes(width u64) !void:
 ..
 
 Lexer.appendEncoded(cpt utf.Codepoint) !void:
-    encoded := array u8[4]
+    encoded := [4]u8
     written := try utf.encode(cpt.value, encoded)
     for i := 0 to written:
         try this.escapedStringScratch.pushRight(encoded[i])
@@ -210,7 +212,7 @@ Lexer.pushTokenBuff() !void:
 	this.currTok.pos.column = this.currTok.pos.column + 1
 ..
 
-global escapeTable := array utf.Codepoint['w'](
+global escapeTable := ['w']utf.Codepoint(
     `a`=utf.Codepoint(width=1, value=`a`),
     `b`=utf.Codepoint(width=1, value=`b`),
     `f`=utf.Codepoint(width=1, value=`f`),
@@ -249,7 +251,7 @@ errorFatal(l Lexer*, code str, msg str, help str, pos org.FilePos) !void:
 lexLitChar(l Lexer*, cpt utf.Codepoint) !void:
     delim := cpt
     start := l.pos
-    
+
     consumeSize(l, cast.u8to64(cpt.width))
 
     if l.idx >= l.max: # FATAL
@@ -277,7 +279,7 @@ lexLitChar(l Lexer*, cpt utf.Codepoint) !void:
     if delim.value == `'` && lit.value > 0x7f:
         try errorFatal(l, "INVALID_WIDTH_CHARLIT", "non-ASCII character in 8-bit character literal", "use backticks for UTF-8 characters", start)
     ..
-    
+
     consumeSize(l, cast.u8to64(lit.width))
 
     if l.idx >= l.max:
@@ -362,7 +364,10 @@ handleNonAlphaKeyword(l Lexer*, cpt utf.Codepoint) !tkt.Token:
     )
 ..
 
-printErrors(l Lexer*) void:
+printErrors(l Lexer*) !void:
+    w := try gl.startLog(log.LogLevel.DEBUG)
+    defer w.end()
+
     for i := 0 to l.errors.count():
         err, e := l.errors.get(i)
         if e.ok():
@@ -444,7 +449,7 @@ toggleNumberMode(l Lexer*, cpt utf.Codepoint) !bool:
     l.mode = LxMode.NUMBER
 
     if cpt.value == `-`:
-        digits := array utf.Codepoint[2]
+        digits := [2]utf.Codepoint
         err := l.peekMany(digits, 2)
 
         if err.nok() || not (digits[1].value >= `0` && digits[1].value <= `9`):
@@ -455,7 +460,7 @@ toggleNumberMode(l Lexer*, cpt utf.Codepoint) !bool:
     ..
 
     if cpt.value == `0`:
-        digits := array utf.Codepoint[2]
+        digits := [2]utf.Codepoint
         err := l.peekMany(digits, 2)
 
         if err.nok():
@@ -498,7 +503,7 @@ pub run(f fctx.FileCtx*) !$ls.List[tkt.Token]:
     onerror lctx.free()
 
     defer printErrors(l)
-    
+
     loop l.idx < l.max:
         cpt := try l.peek()
 
@@ -623,4 +628,27 @@ initCtx(f fctx.FileCtx*) !$Lexer:
         isEscaped=false,
         mode=LxMode.DEFAULT,
     )
+..
+
+pub printTokens(f fctx.FileCtx*) !void:
+    w := try gl.startLog(log.LogLevel.VERBOSE)
+    defer w.end()
+
+    for i := 0 to f.tokens.count():
+        tk := try f.tokens.get(i)
+        gl.logger.log(try tkt.getTkRepr(tk.type))
+
+        if tk.kwType == tkt.KwType.NEWLINE:
+            gl.logger.log("(newline)")
+            gl.logger.log("\n")
+        elif tk.type == tkt.TkType.KEYWORD:
+            gl.logger.log("(")
+            gl.logger.log(try tkt.getKwRepr(tk.kwType))
+            gl.logger.log(") ")
+        else:
+            gl.logger.log("(")
+            gl.logger.log(tk.repr)
+            gl.logger.log(") ")
+        ..
+    ..
 ..

@@ -20,7 +20,7 @@ pub enum TkType u8(
     _END
 )
 
-global TkTypeToRepr str[] = array str[TkType._END](
+global TkTypeToRepr str[] = [TkType._END]str(
     TkType.NONE =     "None"
     TkType.NAME =     "Name"
     TkType.LIT_STR =  "LitStr"
@@ -120,7 +120,7 @@ pub enum KwType u8(
     _END
 )
 
-global KwTypeToRepr str[] = array str[KwType._END](
+global KwTypeToRepr str[] = [KwType._END]str(
     KwType.NONE = ""
     KwType.EQUAL = "="
     KwType.PAREN_OP = "("
@@ -200,8 +200,8 @@ global KwTypeToRepr str[] = array str[KwType._END](
 
 
 global KwReprToType hmp.HashMap[KwType]
-global KwFirstByteHead := array u8[256]
-global KwFirstByteNext := array u8[KwType._END]
+global KwFirstByteHead := [256]u8
+global KwFirstByteNext := [KwType._END]u8
 # The map is process-wide, so its initialized flag must be process-wide too.
 global _kwMapInit bool = false
 

@@ -7,7 +7,29 @@ use "std:strings" strgs
 use "shared/global" gl
 
 pub makeAbsolute(inPath str, fromDir str) !$str:
-    tmpPath $str = try strgs.copy(inPath)
+    tmpPath $str
+    prefixIdx, prefixErr := strgs.find(inPath, "std:")
+    if prefixErr.ok() && prefixIdx == 0:
+        if gl.stdLibRoot == gl.UNSET:
+            throw "standard library root is not configured"
+        ..
+        suffix := try strgs.trimPrefix(inPath, "std:")
+        defer suffix.free()
+        normalizedSuffix := try path.normalize(suffix)
+        defer normalizedSuffix.free()
+        if path.isAbsolute(suffix) || normalizedSuffix == "..":
+            throw "standard library import escapes the std directory"
+        else:
+            idx, err := strgs.find(normalizedSuffix, "../")
+            if err.ok():
+                throw "standard library import escapes the std directory"
+            ..
+        ..
+        parts := [2]str(gl.stdLibRoot, suffix)
+        tmpPath = try path.join(parts)
+    else:
+        tmpPath = try strgs.copy(inPath)
+    ..
 
     if true:
         onerror tmpPath.free()
@@ -27,13 +49,13 @@ pub makeAbsolute(inPath str, fromDir str) !$str:
     ..
 
     # fast path, path is already absolute (unlikely)
-    if testPath(tmpPath):
+    if path.isAbsolute(tmpPath) && testPath(tmpPath):
         ret move tmpPath
     ..
 
     # if not absolute, we need to consider cwd and fromDir
 
-    parts := array str[3](gl.cwd, fromDir, tmpPath)
+    parts := [3]str(gl.cwd, fromDir, tmpPath)
 
     baseDir $str = try path.join(parts)
     onerror baseDir.free()
@@ -50,7 +72,7 @@ pub makeAbsolute(inPath str, fromDir str) !$str:
         ..
         throw "failed to generate absolute path from relative dir"
     ..
-    throw "failed ot generate path"
+    throw "failed to generate path"
 ..
 
 testPath(p str) bool:
