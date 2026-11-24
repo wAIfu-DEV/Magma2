@@ -181,6 +181,7 @@ Builder.build() !$str:
         ret try strings.alloc(0)
     ..
     result str = try strings.alloc(this.totalBytes)
+    onerror result.free()
     slc u8[] = slices.fromPtr(strings.toPtr(result), result.countBytes())
 
     try this.buildToBuff(slc)

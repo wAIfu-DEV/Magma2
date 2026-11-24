@@ -21,8 +21,9 @@ pub Options(
     rejectUntrackedFree bool
 )
 
-# Snapshot of allocation counters. Metadata bytes describe the current tracking
-# table and are not included in liveBytes.
+# Snapshot of allocation counters. allocationBytes and reallocationBytes are
+# cumulative requested sizes; metadata bytes describe the current tracking table
+# and are not included in liveBytes.
 pub Stats(
     liveAllocations u64
     peakAllocations u64
@@ -30,7 +31,9 @@ pub Stats(
     peakBytes u64
     metadataBytes u64
     allocationCalls u64
+    allocationBytes u64
     reallocationCalls u64
+    reallocationBytes u64
     freeCalls u64
     rejectedFrees u64
     rejectedReallocations u64
@@ -53,7 +56,9 @@ pub DebugAllocator impl allocator.Allocator(
     peakCount u64
     peakBytesValue u64
     allocationCallsValue u64
+    allocationBytesValue u64
     reallocationCallsValue u64
+    reallocationBytesValue u64
     freeCallsValue u64
     rejectedFreesValue u64
     rejectedReallocationsValue u64
@@ -153,6 +158,7 @@ debugAlloc(raw ptr, byteCount u64) !u8*:
     pointer := try target.alloc(byteCount)
     record(debug, entry, pointer, byteCount)
     debug.allocationCallsValue = debug.allocationCallsValue + 1
+    debug.allocationBytesValue = debug.allocationBytesValue + byteCount
     ret pointer
 ..
 
@@ -169,6 +175,8 @@ debugFree(raw ptr, pointer u8*) void:
     target := debug.target
     if entry == none:
         debug.rejectedFreesValue = debug.rejectedFreesValue + 1
+        # When untracked frees are allowed, preserve ordinary allocator
+        # behavior for blocks obtained before this wrapper was installed.
         if debug.options.rejectUntrackedFree == false:
             target.free(pointer)
             debug.freeCallsValue = debug.freeCallsValue + 1
@@ -200,6 +208,12 @@ debugRealloc(raw ptr, pointer u8*, byteCount u64) !u8*:
     entry := findEntry(debug, pointer)
     if entry == none:
         debug.rejectedReallocationsValue = debug.rejectedReallocationsValue + 1
+        if debug.options.rejectUntrackedFree == false:
+            replacement := try debug.target.realloc(pointer, byteCount)
+            debug.reallocationCallsValue = debug.reallocationCallsValue + 1
+            debug.reallocationBytesValue = debug.reallocationBytesValue + byteCount
+            ret replacement
+        ..
         throw errors.invalidArgument("block is not tracked by debug allocator")
     ..
     oldSize := entry.size
@@ -216,6 +230,7 @@ debugRealloc(raw ptr, pointer u8*, byteCount u64) !u8*:
         debug.peakBytesValue = debug.liveBytesValue
     ..
     debug.reallocationCallsValue = debug.reallocationCallsValue + 1
+    debug.reallocationBytesValue = debug.reallocationBytesValue + byteCount
     ret replacement
 ..
 
@@ -257,7 +272,9 @@ pub new(target allocator.Allocator, options Options) !$DebugAllocator:
         peakCount=0,
         peakBytesValue=0,
         allocationCallsValue=0,
+        allocationBytesValue=0,
         reallocationCallsValue=0,
+        reallocationBytesValue=0,
         freeCallsValue=0,
         rejectedFreesValue=0,
         rejectedReallocationsValue=0,
@@ -285,7 +302,9 @@ DebugAllocator.stats() Stats:
         peakBytes=this.peakBytesValue,
         metadataBytes=this.capacityValue * sizeof Entry,
         allocationCalls=this.allocationCallsValue,
+        allocationBytes=this.allocationBytesValue,
         reallocationCalls=this.reallocationCallsValue,
+        reallocationBytes=this.reallocationBytesValue,
         freeCalls=this.freeCallsValue,
         rejectedFrees=this.rejectedFreesValue,
         rejectedReallocations=this.rejectedReallocationsValue,

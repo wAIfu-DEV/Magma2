@@ -496,7 +496,11 @@ Array[T].popLeft(a alc.Allocator) !$T:
 # @example
 #   try values.pushRight(a, 42)
 Array[T].pushRight(a alc.Allocator, item $T) !void:
-    idx u64 = try expandRightStorage[T](this, a)
+    idx u64, expandError error = expandRightStorage[T](this, a)
+    if expandError.nok():
+        fg.drop[T](move item)
+        throw expandError
+    ..
     items T[] = this.view()
     bounded idx < items.count():
         # SAFETY: expandRightStorage initialized this vacant slot.

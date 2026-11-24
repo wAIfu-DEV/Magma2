@@ -80,6 +80,16 @@ pub new[T](capacity u64, cleanup fn($T) void) !$HashMap[T]:
 # @example
 #   index := try users.indexOf("alice")
 HashMap[T].indexOf(key str) !u64:
+    idx u64
+    if this.findIndex(key, addrof idx):
+        ret idx
+    ..
+    throw errors.failure("key not found in hash map")
+..
+
+# Finds a key without constructing an error when it is absent.
+# The output index is only written when the key exists.
+HashMap[T].findIndex(key str, index u64*) bool:
     start := hash.string(key) % this.capacity
     # SAFETY: key/state arrays each contain capacity slots; probing is reduced
     # modulo capacity and only occupied keys are inspected.
@@ -89,14 +99,22 @@ HashMap[T].indexOf(key str) !u64:
         for i u64 = 0 to this.capacity:
             idx := (start + i) % this.capacity
             if states[idx] == 0:
-                throw errors.failure("key not found in hash map")
+                ret false
             ..
             if states[idx] == 1 && strings.compare(keys[idx], key):
-                ret idx
+                *index = idx
+                ret true
             ..
         ..
     ..
-    throw errors.failure("key not found in hash map")
+    ret false
+..
+
+# Returns whether key exists without constructing an error for a miss.
+# @complexity O(1) average, O(N) worst case
+HashMap[T].contains(key str) bool:
+    idx u64
+    ret this.findIndex(key, addrof idx)
 ..
 
 # Returns a borrowed copy of the value associated with key.

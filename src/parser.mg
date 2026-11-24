@@ -56,6 +56,7 @@ errorFatal(p Parser*, code str, msg str, help str, pos org.FilePos) !void:
     p.errors.pushRight(comperr.CompErr(
         sev=comperr.Severity.ERROR, code=code, msg=msg, help=help,
         file=p.file, org=org.Origin(filePath=p.file.path, position=pos),
+        relatedFile=none, relatedPos=org.FilePos(line=0, column=0),
     ))
     throw msg
 ..
@@ -64,6 +65,7 @@ nonFatalError(p Parser*, code str, msg str, help str, pos org.FilePos) !void:
     try p.errors.pushRight(comperr.CompErr(
         sev=comperr.Severity.ERROR, code=code, msg=msg, help=help,
         file=p.file, org=org.Origin(filePath=p.file.path, position=pos),
+        relatedFile=none, relatedPos=org.FilePos(line=0, column=0),
     ))
 ..
 
@@ -89,6 +91,44 @@ ensureKwType(p Parser*, tk tkt.Token, type tkt.KwType, msg str, help str) !void:
     if tk.kwType != type:
         try errorFatal(p, "UNEXPECTED_KEYW", msg, help, tk.pos)
     ..
+..
+
+isNameToken(tk tkt.Token) bool:
+    ret tk.type == tkt.TkType.NAME || tk.kwType == tkt.KwType.TO
+..
+
+parseFunctionType(p Parser*, noContext bool, hasFnKeyword bool) !nt.Type*:
+    if hasFnKeyword:
+        p.consume()
+    ..
+    opening := try p.peek()
+    try ensureKwType(p, opening, tkt.KwType.PAREN_OP, "expected '(' in function type", "expected: fn(Type, ...) ReturnType")
+    p.consume()
+    args := nt.emptyNodeArray[nt.Type*]()
+    try consumeNewLines(p)
+    next := try p.peek()
+    if next.kwType != tkt.KwType.PAREN_CL:
+        loop true:
+            argType := try parseType(p)
+            try args.pushRight(ctx.alloc, argType)
+            delimiter := try p.peek()
+            if delimiter.kwType == tkt.KwType.PAREN_CL:
+                break
+            ..
+            try ensureKwType(p, delimiter, tkt.KwType.COMMA, "expected ',' or ')' in function type", "expected: fn(Type, ...) ReturnType")
+            p.consume()
+            try consumeNewLines(p)
+            next = try p.peek()
+            if next.kwType == tkt.KwType.PAREN_CL:
+                break
+            ..
+        ..
+    ..
+    closing := try p.peek()
+    try ensureKwType(p, closing, tkt.KwType.PAREN_CL, "expected ')' after function type arguments", "expected: )")
+    p.consume()
+    retType := try parseType(p)
+    ret try makeType(p, nt.Type.Function(args=move args, returnType=retType, noContext=noContext))
 ..
 
 parseType(p Parser*) !nt.Type*:
@@ -130,43 +170,17 @@ parseType(p Parser*) !nt.Type*:
         closing := try p.peek()
         try ensureKwType(p, closing, tkt.KwType.PAREN_CL, "expected ')' after compiler-known type name", "expected: )")
         p.consume()
-        current = try makeType(p, nt.Type.CompilerKnown(name=value.repr))
+        current = try makeType(p, nt.Type.CompilerKnown(name=value.repr, resolvedValue=""))
     elif start.kwType == tkt.KwType.FN:
-        p.consume()
-        opening := try p.peek()
-        try ensureKwType(p, opening, tkt.KwType.PAREN_OP, "expected '(' after fn", "expected: fn(Type, ...) ReturnType")
-        p.consume()
-        args := nt.emptyNodeArray[nt.Type*]()
-        try consumeNewLines(p)
-        next := try p.peek()
-        if next.kwType != tkt.KwType.PAREN_CL:
-            loop true:
-                argType := try parseType(p)
-                try args.pushRight(ctx.alloc, argType)
-                delimiter := try p.peek()
-                if delimiter.kwType == tkt.KwType.PAREN_CL:
-                    break
-                ..
-                try ensureKwType(p, delimiter, tkt.KwType.COMMA, "expected ',' or ')' in function type", "expected: fn(Type, ...) ReturnType")
-                p.consume()
-                try consumeNewLines(p)
-                next = try p.peek()
-                if next.kwType == tkt.KwType.PAREN_CL:
-                    break
-                ..
-            ..
-        ..
-        closing := try p.peek()
-        try ensureKwType(p, closing, tkt.KwType.PAREN_CL, "expected ')' after function type arguments", "expected: )")
-        p.consume()
-        retType := try parseType(p)
-        current = try makeType(p, nt.Type.Function(args=move args, returnType=retType, noContext=noContext))
+        current = try parseFunctionType(p, noContext, true)
+    elif start.kwType == tkt.KwType.PAREN_OP:
+        current = try parseFunctionType(p, noContext, false)
     else:
         if noContext:
             try errorFatal(p, "NOCTX_TYPE", "noctx must modify a function type", "expected: noctx fn(Types) ReturnType", start.pos)
         ..
         name := try parseName(p, true)
-        current = try makeType(p, nt.Type.Named(name=name, id=0))
+        current = try makeType(p, nt.Type.Named(name=name, decl=none, primitive=nt.PrimitiveType.Unresolved))
     ..
 
     loop true:
@@ -343,8 +357,118 @@ makeType(p Parser*, value nt.Type) !nt.Type*:
     ret try node.implBorrow[nt.Type]()
 ..
 
+makeDeclarationType(p Parser*, name str, declaration decl.Decl*) !nt.Type*:
+    nameNode := try makeName(p, nt.Name.Simple(name=name))
+    ret try makeType(p, nt.Type.Named(name=nameNode, decl=declaration, primitive=nt.PrimitiveType.Unresolved))
+..
+
+makeFunctionDeclType(p Parser*, header nt.Header*, returnType nt.Type*, noContext bool) !nt.Type*:
+    args := nt.emptyNodeArray[nt.Type*]()
+    for i := 0 to header.fields.count():
+        field := try header.fields.get(i)
+        local nt.Expr
+        unsafe:
+            local = *field
+        ..
+        match local as argument:
+        case nt.Expr.VarDef:
+            try args.pushRight(ctx.alloc, argument.type)
+        else:
+            throw "function header contains a non-variable argument"
+        ..
+    ..
+    ret try makeType(p, nt.Type.Function(args=move args, returnType=returnType, noContext=noContext))
+..
+
+headerDecls(header nt.Header*) !$decl.DeclArray:
+    declarations := decl.emptyDeclArray()
+    for i := 0 to header.fields.count():
+        field := try header.fields.get(i)
+        local nt.Expr
+        unsafe:
+            local = *field
+        ..
+        match local as argument:
+        case nt.Expr.VarDef:
+            try declarations.pushRight(ctx.alloc, argument.decl)
+        else:
+            throw "declaration header contains a non-variable field"
+        ..
+    ..
+    ret move declarations
+..
+
+registerHeaderTypeParams(p Parser*, header nt.Header*, scope decl.Scope*) !void:
+    kind := header.kind
+    match kind as template:
+    case nt.HeaderKind.Templated:
+        for i := 0 to template.typeArgs.count():
+            typeArg := try template.typeArgs.get(i)
+            local nt.Type
+            unsafe:
+                local = *typeArg
+            ..
+            match addrof local as parameter:
+            case nt.Type.Named:
+                localName nt.Name
+                unsafe:
+                    localName = *parameter.name
+                ..
+                match localName as name:
+                case nt.Name.Simple:
+                    parameterDecl := try scope.registerDecl(name.name, decl.DeclKind.TypeParameter(name=name.name, index=i))
+                    parameter.decl = parameterDecl
+                    parameterDecl.declType = typeArg
+                    nt.storeTypeNode(typeArg, local)
+                else:
+                    throw "type parameter must have a simple name"
+                ..
+            else:
+                throw "type parameter must have a simple name"
+            ..
+        ..
+    case nt.HeaderKind.Plain:
+        ret
+    ..
+..
+
+headerTypeParamDecls(header nt.Header*) !$decl.DeclArray:
+    declarations := decl.emptyDeclArray()
+    kind := header.kind
+    match kind as template:
+    case nt.HeaderKind.Templated:
+        for i := 0 to template.typeArgs.count():
+            typeArg := try template.typeArgs.get(i)
+            local nt.Type
+            unsafe:
+                local = *typeArg
+            ..
+            match local as parameter:
+            case nt.Type.Named:
+                if parameter.decl == none:
+                    throw "type parameter is not registered in its header scope"
+                ..
+                try declarations.pushRight(ctx.alloc, parameter.decl)
+            else:
+                throw "type parameter must be a named type"
+            ..
+        ..
+    case nt.HeaderKind.Plain:
+        ret move declarations
+    ..
+    ret move declarations
+..
+
 newImplementedTypes() $nt.NodeArray[nt.Type*]:
     ret nt.emptyNodeArray[nt.Type*]()
+..
+
+copyImplementedTypes(source nt.NodeArray[nt.Type*]) !$nt.NodeArray[nt.Type*]:
+    result := newImplementedTypes()
+    for i := 0 to source.count():
+        try result.pushRight(ctx.alloc, try source.get(i))
+    ..
+    ret move result
 ..
 
 makeStmt(p Parser*, value nt.Stmt) !nt.Stmt*:
@@ -442,8 +566,8 @@ parseExpression(p Parser*, minPrec u8) !nt.Expr*:
                 try errorFatal(p, "UNEXPECTED_TOK", "expected member name after '.'", "expected: <name>", memberTk.pos)
             ..
             p.consume()
-            member := try makeExpr(p, nt.Expr.Named(type=none, name=memberTk.repr, declId=0))
-            left = try makeExpr(p, nt.Expr.MemberAccess(type=none, owner=left, member=member))
+            member := try makeExpr(p, nt.Expr.Named(type=none, name=memberTk.repr, decl=none, category=nt.ValueCategory.Unresolved, sourcePos=memberTk.pos))
+            left = try makeExpr(p, nt.Expr.MemberAccess(type=none, owner=left, member=member, category=nt.ValueCategory.Unresolved, isProtoMethod=false))
             continue
         ..
         # Calls are postfix operations too. The callee may be a name or a
@@ -460,7 +584,8 @@ parseExpression(p Parser*, minPrec u8) !nt.Expr*:
             # what we call is a global name (classical function)
             # or a pointer to a function
             left = try makeExpr(p, nt.Expr.IndirectCall(
-                type=none, owner=left, args=move args,
+                type=none, owner=left, args=move args, typeArgs=nt.emptyTypeArray(), sourcePos=op.pos,
+                callKind=nt.CallKind.Unresolved, target=none,
             ))
             continue
         ..
@@ -493,12 +618,12 @@ parseExpression(p Parser*, minPrec u8) !nt.Expr*:
             if genericCall:
                 typeArgs := try parseTemplateArgs(p)
                 args := try parseCallArgs(p)
-                left = try makeExpr(p, nt.Expr.TemplatedIndirectCall(type=none, owner=left, args=move args, typeArgs=move typeArgs))
+                left = try makeExpr(p, nt.Expr.TemplatedIndirectCall(type=none, owner=left, args=move args, typeArgs=move typeArgs, sourcePos=op.pos, callKind=nt.CallKind.Unresolved, target=none))
                 continue
             ..
             if genericReference:
                 typeArgs := try parseTemplateArgs(p)
-                left = try makeExpr(p, nt.Expr.GenericApply(owner=left, typeArgs=move typeArgs))
+                left = try makeExpr(p, nt.Expr.GenericApply(type=none, owner=left, typeArgs=move typeArgs))
                 continue
             ..
             p.consume()
@@ -506,7 +631,7 @@ parseExpression(p Parser*, minPrec u8) !nt.Expr*:
             close := try p.peek()
             try ensureKwType(p, close, tkt.KwType.BRACK_CL, "expected closing bracket after subscript", "expected: ]")
             p.consume()
-            left = try makeExpr(p, nt.Expr.Subscript(type=none, owner=left, index=index))
+            left = try makeExpr(p, nt.Expr.Subscript(type=none, owner=left, index=index, category=nt.ValueCategory.Unresolved))
             continue
         ..
         prec := binaryPrecedence(op)
@@ -521,9 +646,9 @@ parseExpression(p Parser*, minPrec u8) !nt.Expr*:
         ..
         right := try parseExpression(p, rightMin)
         if op.kwType == tkt.KwType.EQUAL || op.kwType == tkt.KwType.INFER:
-            left = try makeExpr(p, nt.Expr.Assign(type=none, assignee=left, expr=right))
+            left = try makeExpr(p, nt.Expr.Assign(type=none, assignee=left, expr=right, sourcePos=op.pos, resolvedFieldIndex=0, hasResolvedFieldIndex=false))
         else:
-            left = try makeExpr(p, nt.Expr.Binary(type=none, op=cast.u64to8(op.kwType), left=left, right=right))
+            left = try makeExpr(p, nt.Expr.Binary(type=none, op=cast.u64to8(op.kwType), left=left, right=right, protoEquality=false, stringEquality=false, floatingPoint=false, unsignedOperation=false))
         ..
     ..
 ..
@@ -644,17 +769,68 @@ parseExprPrefix(p Parser*) !nt.Expr*:
             operation := try p.peek()
             try ensureTkType(p, operation, tkt.TkType.LIT_STR, "expected @llvm operation name", "expected a string literal")
             p.consume()
-            depth u64 = 1
-            loop depth > 0:
-                item := try p.peek()
+            operationSeparator := try p.peek()
+            try ensureKwType(p, operationSeparator, tkt.KwType.COMMA, "expected comma after @llvm operation", "expected: @llvm(\"operation\", ..., ResultType)")
+            p.consume()
+            argumentStart := p.idx
+            lastArgumentStart := argumentStart
+            closingIndex := p.file.tokens.count()
+            scanIndex := argumentStart
+            parenDepth u64 = 1
+            bracketDepth u64 = 0
+            loop scanIndex < p.file.tokens.count():
+                item := try p.file.tokens.get(scanIndex)
                 if item.kwType == tkt.KwType.PAREN_OP:
-                    depth = depth + 1
+                    parenDepth = parenDepth + 1
                 elif item.kwType == tkt.KwType.PAREN_CL:
-                    depth = depth - 1
+                    if parenDepth == 1 && bracketDepth == 0:
+                        closingIndex = scanIndex
+                        break
+                    ..
+                    parenDepth = parenDepth - 1
+                elif item.kwType == tkt.KwType.BRACK_OP:
+                    bracketDepth = bracketDepth + 1
+                elif item.kwType == tkt.KwType.BRACK_CL:
+                    if bracketDepth != 0:
+                        bracketDepth = bracketDepth - 1
+                    ..
+                elif item.kwType == tkt.KwType.COMMA && parenDepth == 1 && bracketDepth == 0:
+                    lastArgumentStart = scanIndex + 1
                 ..
+                scanIndex = scanIndex + 1
+            ..
+            if closingIndex == p.file.tokens.count() || lastArgumentStart >= closingIndex:
+                try errorFatal(p, "LLVM_RESULT_TYPE", "@llvm requires an explicit result type as its final argument", "expected: @llvm(\"operation\", ..., ResultType)", operation.pos)
+            ..
+            arguments := nt.emptyExpressionArray()
+            p.idx = argumentStart
+            for _ := argumentStart to lastArgumentStart:
+                if p.idx >= lastArgumentStart:
+                    break
+                ..
+                argument := try parseExpression(p, 0)
+                try arguments.pushRight(ctx.alloc, argument)
+                if p.idx >= lastArgumentStart:
+                    break
+                ..
+                separator := try p.peek()
+                try ensureKwType(p, separator, tkt.KwType.COMMA, "expected comma between @llvm operands and result type", "expected: @llvm(\"operation\", operand, ResultType)")
                 p.consume()
             ..
-            ret try makeExpr(p, nt.Expr.InlineLLVM(operation=operation.repr))
+            if p.idx != lastArgumentStart:
+                try errorFatal(p, "LLVM_ARGUMENTS", "could not parse @llvm operands", "the result type must be the final argument", operation.pos)
+            ..
+            p.idx = lastArgumentStart
+            resultType := try parseType(p)
+            if p.idx != closingIndex:
+                errorPos := operation.pos
+                if p.idx < p.file.tokens.count():
+                    errorPos = (try p.file.tokens.get(p.idx)).pos
+                ..
+                try errorFatal(p, "LLVM_RESULT_TYPE", "expected one result type as the final @llvm argument", "the final argument must be a type", errorPos)
+            ..
+            p.idx = closingIndex + 1
+            ret try makeExpr(p, nt.Expr.InlineLLVM(type=resultType, operation=operation.repr, args=move arguments))
         ..
 
         # this is shit from a butt, this needs to be in a list, not hardcoded
@@ -674,7 +850,7 @@ parseExprPrefix(p Parser*) !nt.Expr*:
         try ensureKwType(p, closing, tkt.KwType.PAREN_CL, "expected ')' after compiler directive argument", "expected: )")
         p.consume()
         if isKnownConst:
-            ret try makeExpr(p, nt.Expr.CompilerKnown(name=source.repr))
+            ret try makeExpr(p, nt.Expr.CompilerKnown(name=source.repr, resolvedValue=""))
         ..
         fromDir := try path.parent(p.file.path)
         defer fromDir.free()
@@ -701,7 +877,7 @@ parseExprPrefix(p Parser*) !nt.Expr*:
             initializer := try p.peek()
             try ensureKwType(p, initializer, tkt.KwType.PAREN_OP, "inferred array length requires an initializer list", "expected: []Type(...)")
         ..
-        ret try makeExpr(p, nt.Expr.Array(type=elementType, length=length, inferLength=inferLength))
+        ret try makeExpr(p, nt.Expr.Array(type=elementType, length=length, inferLength=inferLength, resolvedLength=0, hasResolvedLength=false, resolvedIndices=nt.emptyIndexArray()))
     ..
 
     if t.kwType == tkt.KwType.TRY:
@@ -713,12 +889,12 @@ parseExprPrefix(p Parser*) !nt.Expr*:
     if t.type == tkt.TkType.NAME && t.repr == "move":
         p.consume()
         operand := try parseExpression(p, 80)
-        ret try makeExpr(p, nt.Expr.Move(operand=operand))
+        ret try makeExpr(p, nt.Expr.Move(type=none, operand=operand))
     ..
 
-    if t.type == tkt.TkType.NAME:
+    if isNameToken(t):
         p.consume()
-        ret try makeExpr(p, nt.Expr.Named(type=none, name=t.repr, declId=0))
+        ret try makeExpr(p, nt.Expr.Named(type=none, name=t.repr, decl=none, category=nt.ValueCategory.Unresolved, sourcePos=t.pos))
     ..
 
     if t.type >= tkt.TkType.LIT_STR && t.type <= tkt.TkType.LIT_CHAR32:
@@ -734,7 +910,7 @@ parseExprPrefix(p Parser*) !nt.Expr*:
     if t.type == tkt.TkType.KEYWORD && (t.kwType == tkt.KwType.MINUS || t.kwType == tkt.KwType.NOT || t.kwType == tkt.KwType.TILDE || t.kwType == tkt.KwType.ASTERIX || t.kwType == tkt.KwType.AMPERSAND || t.kwType == tkt.KwType.ADDROF):
         p.consume()
         operand := try parseExpression(p, 80)
-        ret try makeExpr(p, nt.Expr.Unary(type=none, op=cast.u64to8(t.kwType), operand=operand))
+        ret try makeExpr(p, nt.Expr.Unary(type=none, op=cast.u64to8(t.kwType), operand=operand, category=nt.ValueCategory.Unresolved, floatingPoint=false))
     ..
 
     if t.kwType == tkt.KwType.PAREN_OP:
@@ -754,7 +930,9 @@ parseExprPrefix(p Parser*) !nt.Expr*:
 # Not to be used in expressions
 parseName(p Parser*, allowComposite bool) !nt.Name*:
     t := try p.peek()
-    try ensureTkType(p, t, tkt.TkType.NAME, "unexpected token while expected name", "expected: <name>, <name>.<method>")
+    if not isNameToken(t):
+        try errorFatal(p, "UNEXPECTED_TOK", "unexpected token while expected name", "expected: <name>, <name>.<method>", t.pos)
+    ..
     p.consume()
 
     if not allowComposite:
@@ -793,13 +971,16 @@ parseName(p Parser*, allowComposite bool) !nt.Name*:
 
 parseNameSimple(p Parser*) !str:
     t := try p.peek()
-    try ensureTkType(p, t, tkt.TkType.NAME, "unexpected token while expected name", "expected: <name>")
+    if not isNameToken(t):
+        try errorFatal(p, "UNEXPECTED_TOK", "unexpected token while expected name", "expected: <name>", t.pos)
+    ..
     p.consume()
     ret t.repr
 ..
 
 # used for speculative parsing with already parsed name
 parseVarDefTypedWithName(p Parser*, name str) !nt.Expr*:
+    nameToken := try p.peek()
     type := try parseType(p)
     boundedCount str = ""
     next := try p.peek()
@@ -812,12 +993,25 @@ parseVarDefTypedWithName(p Parser*, name str) !nt.Expr*:
         boundedCount = extent.repr
         p.consume()
     ..
-    ret try makeExpr(p, nt.Expr.VarDef(type=type, name=name, declId=0, boundedCount=boundedCount))
+    ret try makeExpr(p, nt.Expr.VarDef(type=type, name=name, decl=none, boundedCount=boundedCount, sourcePos=nameToken.pos))
 ..
 
 parseVarDefTyped(p Parser*) !nt.Expr*:
+    nameToken := try p.peek()
     name := try parseNameSimple(p)
-    ret try parseVarDefTypedWithName(p, name)
+    type := try parseType(p)
+    boundedCount str = ""
+    next := try p.peek()
+    if next.kwType == tkt.KwType.BOUNDED:
+        p.consume()
+        extent := try p.peek()
+        if extent.type != tkt.TkType.NAME && extent.type != tkt.TkType.LIT_NUM:
+            try errorFatal(p, "BOUNDED_EXTENT", "bounded parameter extent must be a name or non-negative integer", "expected: pointer Type bounded count", extent.pos)
+        ..
+        boundedCount = extent.repr
+        p.consume()
+    ..
+    ret try makeExpr(p, nt.Expr.VarDef(type=type, name=name, decl=none, boundedCount=boundedCount, sourcePos=nameToken.pos))
 ..
 
 parseTypedArgList(p Parser*) !$nt.NodeArray[nt.Expr*]:
@@ -886,7 +1080,7 @@ parseHeader(p Parser*, name str) !nt.Header*:
     ..
 
     fields := try parseTypedArgList(p)
-    ret try makeHeader(p, nt.Header(id=0, scopeId=0, name=name, fields=move fields, kind=move kind))
+    ret try makeHeader(p, nt.Header(decl=none, scope=none, name=name, fields=move fields, kind=move kind))
 ..
 
 headerIsTemplated(header nt.Header*) bool:
@@ -900,6 +1094,76 @@ headerIsTemplated(header nt.Header*) bool:
     ret false
 ..
 
+looksLikeFunctionTypeVariable(p Parser*) !bool:
+    if p.idx + 1 >= p.file.tokens.count():
+        ret false
+    ..
+    opening := try p.file.tokens.get(p.idx + 1)
+    if opening.kwType != tkt.KwType.PAREN_OP:
+        ret false
+    ..
+    depth u64 = 0
+    closingIndex := p.file.tokens.count()
+    for i := p.idx + 1 to p.file.tokens.count():
+        token := try p.file.tokens.get(i)
+        if token.kwType == tkt.KwType.PAREN_OP:
+            depth = depth + 1
+        elif token.kwType == tkt.KwType.PAREN_CL:
+            depth = depth - 1
+            if depth == 0:
+                closingIndex = i
+                break
+            ..
+        ..
+    ..
+    if closingIndex + 1 >= p.file.tokens.count():
+        ret false
+    ..
+    cursor := closingIndex + 1
+    token := try p.file.tokens.get(cursor)
+    loop token.kwType == tkt.KwType.EXCLAM || token.kwType == tkt.KwType.DOLLAR || token.kwType == tkt.KwType.NOCTX:
+        cursor = cursor + 1
+        if cursor >= p.file.tokens.count():
+            ret false
+        ..
+        token = try p.file.tokens.get(cursor)
+    ..
+    if not isNameToken(token) && token.kwType != tkt.KwType.FN && token.kwType != tkt.KwType.PAREN_OP:
+        ret false
+    ..
+    if token.kwType == tkt.KwType.PAREN_OP:
+        nestedDepth u64 = 0
+        loop cursor < p.file.tokens.count():
+            token = try p.file.tokens.get(cursor)
+            if token.kwType == tkt.KwType.PAREN_OP:
+                nestedDepth = nestedDepth + 1
+            elif token.kwType == tkt.KwType.PAREN_CL:
+                nestedDepth = nestedDepth - 1
+                if nestedDepth == 0:
+                    cursor = cursor + 1
+                    break
+                ..
+            ..
+            cursor = cursor + 1
+        ..
+        if cursor >= p.file.tokens.count():
+            ret false
+        ..
+        cursor = cursor + 1
+    else:
+        cursor = cursor + 1
+    ..
+    token = try p.file.tokens.get(cursor)
+    loop token.kwType == tkt.KwType.ASTERIX:
+        cursor = cursor + 1
+        if cursor >= p.file.tokens.count():
+            ret false
+        ..
+        token = try p.file.tokens.get(cursor)
+    ..
+    ret token.kwType == tkt.KwType.EQUAL
+..
+
 parseStatement(p Parser*) !nt.Stmt*:
     t := try p.peek()
     if t.type == tkt.TkType.NAME && p.idx + 1 < p.file.tokens.count():
@@ -908,6 +1172,9 @@ parseStatement(p Parser*) !nt.Stmt*:
             ret try parseDestructureStatement(p)
         ..
         if following.type == tkt.TkType.NAME || following.kwType == tkt.KwType.INFER || following.kwType == tkt.KwType.DOLLAR || following.kwType == tkt.KwType.EXCLAM || following.kwType == tkt.KwType.NOCTX:
+            ret try parseVariableStatement(p)
+        ..
+        if following.kwType == tkt.KwType.PAREN_OP && (try looksLikeFunctionTypeVariable(p)):
             ret try parseVariableStatement(p)
         ..
     ..
@@ -921,23 +1188,35 @@ parseStatement(p Parser*) !nt.Stmt*:
             next := try p.peek()
             if next.kwType != tkt.KwType.NEWLINE && next.kwType != tkt.KwType.DOTS:
                 value := try parseExpression(p, 0)
-                expr = try makeExpr(p, nt.Expr.Return(expr=value))
+                expr = try makeExpr(p, nt.Expr.Return(expr=value, sourcePos=t.pos))
             else:
-                expr = try makeExpr(p, nt.Expr.Return(expr=none))
+                expr = try makeExpr(p, nt.Expr.Return(expr=none, sourcePos=t.pos))
             ..
         else:
-            expr = try makeExpr(p, nt.Expr.Return(expr=none))
+            expr = try makeExpr(p, nt.Expr.Return(expr=none, sourcePos=t.pos))
         ..
         ret try makeStmt(p, nt.Stmt.Expression(expr=expr))
     elif t.kwType == tkt.KwType.THROW:
         p.consume()
         value := try parseExpression(p, 0)
-        ret try makeStmt(p, nt.Stmt.Expression(expr=try makeExpr(p, nt.Expr.Throw(expr=value))))
+        ret try makeStmt(p, nt.Stmt.Expression(expr=try makeExpr(p, nt.Expr.Throw(expr=value, sourcePos=t.pos))))
     elif t.kwType == tkt.KwType.BREAK:
         p.consume()
+        if p.idx < p.file.tokens.count():
+            next := try p.peek()
+            if next.kwType != tkt.KwType.NEWLINE && next.kwType != tkt.KwType.DOTS:
+                try errorFatal(p, "BREAK_OPERAND", "break does not accept an operand", "write break on its own line", next.pos)
+            ..
+        ..
         ret try makeStmt(p, nt.Stmt.Break())
     elif t.kwType == tkt.KwType.CONTINUE:
         p.consume()
+        if p.idx < p.file.tokens.count():
+            next := try p.peek()
+            if next.kwType != tkt.KwType.NEWLINE && next.kwType != tkt.KwType.DOTS:
+                try errorFatal(p, "CONTINUE_OPERAND", "continue does not accept an operand", "write continue on its own line", next.pos)
+            ..
+        ..
         ret try makeStmt(p, nt.Stmt.Continue())
     elif t.kwType == tkt.KwType.DEFER || t.kwType == tkt.KwType.ONERROR || t.kwType == tkt.KwType.UNSAFE:
         p.consume()
@@ -1025,9 +1304,11 @@ parseStatement(p Parser*) !nt.Stmt*:
         ret try parseIfStmt(p)
     elif t.kwType == tkt.KwType.LOOP:
         p.consume()
+        conditionToken := try p.peek()
+        conditionPos := conditionToken.pos
         condition := try parseExpression(p, 0)
         body := try parseBody(p)
-        ret try makeStmt(p, nt.Stmt.Loop(condition=condition, body=body))
+        ret try makeStmt(p, nt.Stmt.Loop(condition=condition, body=body, sourcePos=conditionPos))
     elif t.kwType == tkt.KwType.FOR:
         ret try parseForStmt(p)
     else:
@@ -1046,9 +1327,9 @@ parseDestructureStatement(p Parser*) !nt.Stmt*:
     try ensureKwType(p, infer, tkt.KwType.INFER, "destructuring declarations require inferred assignment", "expected: :=")
     p.consume()
     call := try parseExpression(p, 0)
-    valueId := try registerLocalDecl(p, valueName, none, comma.pos)
-    errorId := try registerLocalDecl(p, errorName, none, comma.pos)
-    expr := try makeExpr(p, nt.Expr.VarDefAssignDestructure(type=none, nameValue=valueName, nameError=errorName, call=call, valueDeclId=valueId, errorDeclId=errorId))
+    valueDecl := try registerLocalDecl(p, valueName, none, comma.pos)
+    errorDecl := try registerLocalDecl(p, errorName, none, comma.pos)
+    expr := try makeExpr(p, nt.Expr.VarDefAssignDestructure(type=none, nameValue=valueName, nameError=errorName, call=call, valueDecl=valueDecl, errorDecl=errorDecl))
     ret try makeStmt(p, nt.Stmt.Expression(expr=expr))
 ..
 
@@ -1057,10 +1338,10 @@ parseMatchArmBody(p Parser*) !nt.Stmt*:
     try ensureKwType(p, opening, tkt.KwType.COLON, "expected ':' after match arm", "expected: case Union.Variant:")
     p.consume()
     oldScope := p.scope
-    scopeId u64 = 0
+    bodyScope decl.Scope* = none
     if p.scope != none:
         p.scope = try p.scope.registerScope(decl.ScopeKind.Block())
-        scopeId = p.scope.id
+        bodyScope = p.scope
     ..
     statements := nt.emptyNodeArray[nt.Stmt*]()
     loop true:
@@ -1070,7 +1351,7 @@ parseMatchArmBody(p Parser*) !nt.Stmt*:
             continue
         elif t.kwType == tkt.KwType.CASE || t.kwType == tkt.KwType.ELSE || t.kwType == tkt.KwType.DOTS:
             p.scope = oldScope
-            ret try makeStmt(p, nt.Stmt.Body(statements=move statements, scopeId=scopeId))
+            ret try makeStmt(p, nt.Stmt.Body(statements=move statements, scope=bodyScope))
         ..
         statement := try parseStatement(p)
         try statements.pushRight(ctx.alloc, statement)
@@ -1088,7 +1369,7 @@ parseMatchStmt(p Parser*) !nt.Stmt*:
     if p.scope != none:
         p.scope = try p.scope.registerScope(decl.ScopeKind.Block())
     ..
-    bindingDeclId := try registerLocalDecl(p, binding, none, asTk.pos)
+    bindingDecl := try registerLocalDecl(p, binding, none, asTk.pos)
     opening := try p.peek()
     try ensureKwType(p, opening, tkt.KwType.COLON, "expected ':' after match binding", "expected: match value as binding:")
     p.consume()
@@ -1111,7 +1392,9 @@ parseMatchStmt(p Parser*) !nt.Stmt*:
             p.consume()
             variant := try parseName(p, true)
             localVariant nt.Name
-            unsafe localVariant = *variant
+            unsafe:
+                localVariant = *variant
+            ..
             match localVariant as variantName:
             case nt.Name.Composite:
                 if variantName.names.count() < 2:
@@ -1121,7 +1404,7 @@ parseMatchStmt(p Parser*) !nt.Stmt*:
                 try nonFatalError(p, "MATCH_VARIANT", "match case must name a union variant", "expected: case Union.Variant:", t.pos)
             ..
             body := try parseMatchArmBody(p)
-            node := try makeMatchCase(p, nt.MatchCase(variant=variant, body=body))
+            node := try makeMatchCase(p, nt.MatchCase(variant=variant, decl=none, body=body))
             try cases.pushRight(ctx.alloc, node)
         else:
             try nonFatalError(p, "MATCH_ARM", "expected case, else, or end of match", "expected: case, else, or ...", t.pos)
@@ -1134,7 +1417,7 @@ parseMatchStmt(p Parser*) !nt.Stmt*:
             ..
         ..
     ..
-    ret try makeStmt(p, nt.Stmt.Match(expression=expression, binding=binding, bindingDeclId=bindingDeclId, cases=move cases, elseBody=elseBody))
+    ret try makeStmt(p, nt.Stmt.Match(expression=expression, binding=binding, bindingDecl=bindingDecl, cases=move cases, elseBody=elseBody, pointerMode=false))
 ..
 
 parseVariableStatement(p Parser*) !nt.Stmt*:
@@ -1158,9 +1441,9 @@ parseVariableStatement(p Parser*) !nt.Stmt*:
             try ensureKwType(p, assign, tkt.KwType.EQUAL, "expected '=' after destructured declaration types", "expected: value Type, errorName ErrorType = call()")
             p.consume()
             call := try parseExpression(p, 0)
-            valueDeclId := try registerLocalDecl(p, name, type, nameTk.pos)
-            errorDeclId := try registerLocalDecl(p, errorName, errorType, errorNameTk.pos)
-            expr := try makeExpr(p, nt.Expr.VarDefAssignDestructure(type=type, nameValue=name, nameError=errorName, call=call, valueDeclId=valueDeclId, errorDeclId=errorDeclId))
+            valueDecl := try registerLocalDecl(p, name, type, nameTk.pos)
+            errorDecl := try registerLocalDecl(p, errorName, errorType, errorNameTk.pos)
+            expr := try makeExpr(p, nt.Expr.VarDefAssignDestructure(type=type, nameValue=name, nameError=errorName, call=call, valueDecl=valueDecl, errorDecl=errorDecl))
             ret try makeStmt(p, nt.Stmt.Expression(expr=expr))
         ..
     ..
@@ -1168,18 +1451,20 @@ parseVariableStatement(p Parser*) !nt.Stmt*:
     if next.kwType == tkt.KwType.EQUAL || next.kwType == tkt.KwType.INFER:
         p.consume()
         value := try parseExpression(p, 0)
-        declId := try registerLocalDecl(p, name, type, nameTk.pos)
-        expr := try makeExpr(p, nt.Expr.VarDefAssign(type=type, name=name, assignment=value, declId=declId))
+        localDecl := try registerLocalDecl(p, name, type, nameTk.pos)
+        expr := try makeExpr(p, nt.Expr.VarDefAssign(type=type, name=name, assignment=value, decl=localDecl, sourcePos=nameTk.pos))
         ret try makeStmt(p, nt.Stmt.Expression(expr=expr))
     ..
-    declId := try registerLocalDecl(p, name, type, nameTk.pos)
-    expr := try makeExpr(p, nt.Expr.VarDef(type=type, name=name, declId=declId, boundedCount=""))
+    localDecl := try registerLocalDecl(p, name, type, nameTk.pos)
+    expr := try makeExpr(p, nt.Expr.VarDef(type=type, name=name, decl=localDecl, boundedCount="", sourcePos=nameTk.pos))
     ret try makeStmt(p, nt.Stmt.Expression(expr=expr))
 ..
 
 parseIfStmt(p Parser*) !nt.Stmt*:
     t := try p.peek()
     p.consume()
+    conditionToken := try p.peek()
+    conditionPos := conditionToken.pos
     condition := try parseExpression(p, 0)
     body := try parseBody(p)
 
@@ -1190,13 +1475,15 @@ parseIfStmt(p Parser*) !nt.Stmt*:
             nextStmt = try parseIfTail(p)
         ..
     ..
-    ret try makeStmt(p, nt.Stmt.If(condition=condition, body=body, next=nextStmt))
+    ret try makeStmt(p, nt.Stmt.If(condition=condition, body=body, next=nextStmt, sourcePos=conditionPos))
 ..
 
 parseIfTail(p Parser*) !nt.Stmt*:
     t := try p.peek()
     if t.kwType == tkt.KwType.ELIF:
         p.consume()
+        conditionToken := try p.peek()
+        conditionPos := conditionToken.pos
         condition := try parseExpression(p, 0)
         body := try parseBody(p)
         next := try p.peek()
@@ -1204,7 +1491,7 @@ parseIfTail(p Parser*) !nt.Stmt*:
         if next.kwType == tkt.KwType.ELIF || next.kwType == tkt.KwType.ELSE:
             tail = try parseIfTail(p)
         ..
-        ret try makeStmt(p, nt.Stmt.Elif(condition=condition, body=body, next=tail))
+        ret try makeStmt(p, nt.Stmt.Elif(condition=condition, body=body, next=tail, sourcePos=conditionPos))
     elif t.kwType == tkt.KwType.ELSE:
         p.consume()
         body := try parseBody(p)
@@ -1218,10 +1505,10 @@ parseForStmt(p Parser*) !nt.Stmt*:
     nameTk := try p.peek()
     name := try parseNameSimple(p)
     oldScope := p.scope
-    loopScopeId u64 = 0
+    loopScope decl.Scope* = none
     if p.scope != none:
         p.scope = try p.scope.registerScope(decl.ScopeKind.Block())
-        loopScopeId = p.scope.id
+        loopScope = p.scope
     ..
     next := try p.peek()
     index nt.Expr*
@@ -1237,15 +1524,15 @@ parseForStmt(p Parser*) !nt.Stmt*:
         p.consume()
         initial = try parseExpression(p, 0)
     ..
-    declId := try registerLocalDecl(p, name, varType, nameTk.pos)
-    index = try makeExpr(p, nt.Expr.VarDefAssign(type=varType, name=name, assignment=initial, declId=declId))
+    localDecl := try registerLocalDecl(p, name, varType, nameTk.pos)
+    index = try makeExpr(p, nt.Expr.VarDefAssign(type=varType, name=name, assignment=initial, decl=localDecl, sourcePos=nameTk.pos))
     toToken := try p.peek()
     try ensureKwType(p, toToken, tkt.KwType.TO, "expected 'to' after for-loop index", "expected: to <bound>")
     p.consume()
     bound := try parseExpression(p, 0)
     body := try parseBody(p)
     p.scope = oldScope
-    ret try makeStmt(p, nt.Stmt.ForLoop(index=index, bound=bound, body=body, scopeId=loopScopeId))
+    ret try makeStmt(p, nt.Stmt.ForLoop(index=index, bound=bound, body=body, scope=loopScope))
 ..
 
 parseBody(p Parser*) !nt.Stmt*:
@@ -1254,10 +1541,10 @@ parseBody(p Parser*) !nt.Stmt*:
     p.consume()
 
     oldScope := p.scope
-    bodyScopeId u64 = 0
+    bodyScope decl.Scope* = none
     if p.scope != none:
         p.scope = try p.scope.registerScope(decl.ScopeKind.Block())
-        bodyScopeId = p.scope.id
+        bodyScope = p.scope
     ..
 
     statements := nt.emptyNodeArray[nt.Stmt*]()
@@ -1271,10 +1558,10 @@ parseBody(p Parser*) !nt.Stmt*:
         if t.kwType == tkt.KwType.DOTS:
             p.consume()
             p.scope = oldScope
-            ret try makeStmt(p, nt.Stmt.Body(statements=move statements, scopeId=bodyScopeId))
+            ret try makeStmt(p, nt.Stmt.Body(statements=move statements, scope=bodyScope))
         elif t.kwType == tkt.KwType.ELIF || t.kwType == tkt.KwType.ELSE:
             p.scope = oldScope
-            ret try makeStmt(p, nt.Stmt.Body(statements=move statements, scopeId=bodyScopeId))
+            ret try makeStmt(p, nt.Stmt.Body(statements=move statements, scope=bodyScope))
         elif t.kwType == tkt.KwType.NEWLINE:
             p.consume()
             continue
@@ -1287,7 +1574,7 @@ parseBody(p Parser*) !nt.Stmt*:
 
 Parser.parsePrunedGlobal() !void:
     originalModule := this.module
-    scratchModule := try decl.registerModule(this.file.path)
+    scratchModule := try decl.registerTransientModule(this.file.path)
     this.module = scratchModule
     _ := try parseGlobalStmt(this)
     this.module = originalModule
@@ -1385,6 +1672,52 @@ parseGlobalStmt(p Parser*) !nt.GlobalStmt*:
             ownerTk := try p.peek()
             p.consume()
             ownerArgs := try parseTemplateArgs(p)
+            ownerDeclaration, ownerError := p.module.getDeclFromName(ownerTk.repr)
+            if ownerError.ok():
+                ownerKind := ownerDeclaration.kind
+                match ownerKind as owner:
+                case decl.DeclKind.Struct:
+                    for i := 0 to ownerArgs.count():
+                        if i >= owner.typeParams.count():
+                            break
+                        ..
+                        argument := try ownerArgs.get(i)
+                        localArgument nt.Type
+                        unsafe:
+                            localArgument = *argument
+                        ..
+                        match addrof localArgument as namedArgument:
+                        case nt.Type.Named:
+                            localName := namedArgument.name
+                            if localName != none:
+                                nameNode nt.Name
+                                unsafe:
+                                    nameNode = *localName
+                                ..
+                                match nameNode as simpleName:
+                                case nt.Name.Simple:
+                                    parameter := try owner.typeParams.get(i)
+                                    match parameter.kind as parameterKind:
+                                    case decl.DeclKind.TypeParameter:
+                                        if simpleName.name == parameterKind.name:
+                                            namedArgument.decl = parameter
+                                            nt.storeTypeNode(argument, localArgument)
+                                        ..
+                                    else:
+                                        parameter = parameter
+                                    ..
+                                else:
+                                    localName = localName
+                                ..
+                            ..
+                        else:
+                            argument = argument
+                        ..
+                    ..
+                else:
+                    ownerKind = ownerKind
+                ..
+            ..
             dot := try p.peek()
             p.consume()
             memberTk := try p.peek()
@@ -1395,13 +1728,15 @@ parseGlobalStmt(p Parser*) !nt.GlobalStmt*:
             try names.pushRight(ctx.alloc, memberTk.repr)
             name = try makeName(p, nt.Name.Composite(names=move names))
             ownerName := try makeName(p, nt.Name.Simple(name=ownerTk.repr))
-            ownerType := try makeType(p, nt.Type.Named(name=ownerName, id=0))
+            ownerType := try makeType(p, nt.Type.Named(name=ownerName, decl=none, primitive=nt.PrimitiveType.Unresolved))
             genericOwnerType = try makeType(p, nt.Type.Templated(owner=ownerType, args=move ownerArgs))
         else:
             name = try parseName(p, true)
         ..
         localName nt.Name
-        unsafe localName = *name # workaround since match doesn't work yet with pointer types
+        unsafe:
+            localName = *name
+        ..
 
         if p.idx < p.file.tokens.count():
             t = try p.peek()
@@ -1422,20 +1757,28 @@ parseGlobalStmt(p Parser*) !nt.GlobalStmt*:
             ownerNode := try makeName(p, nt.Name.Simple(name=ownerName))
             ownerType nt.Type* = genericOwnerType
             if ownerType == none:
-                ownerType = try makeType(p, nt.Type.Named(name=ownerNode, id=0))
+                ownerType = try makeType(p, nt.Type.Named(name=ownerNode, decl=none, primitive=nt.PrimitiveType.Unresolved))
             ..
             if t.kwType != tkt.KwType.PAREN_OP && t.kwType != tkt.KwType.BRACK_OP:
                 try errorFatal(p, "METHOD_HEADER", "expected method argument list", "expected: Owner.method(args)", t.pos)
             ..
             header := try parseHeader(p, methodName)
             oldScope := p.scope
+            if genericOwnerType != none:
+                ownerDeclaration, ownerLookupErr := p.module.getDeclFromName(ownerName)
+                if ownerLookupErr.ok() && ownerDeclaration.sourceHeader != none:
+                    p.scope = ownerDeclaration.sourceHeader.scope
+                ..
+            ..
             try registerHeaderArgs(p, header, decl.ScopeKind.Method())
-            methodScope := try p.module.getScope(header.scopeId)
+            methodScope := header.scope
+            receiverDecl decl.Decl* = none
             receiverNameIdx, receiverNameErr := methodScope.names.indexOf("this")
             if receiverNameErr.ok():
                 try nonFatalError(p, "DUPLICATE_ARGUMENT", "method arguments cannot shadow the receiver name 'this'", "rename the method argument", namePos)
             else:
-                try methodScope.registerDecl("this", decl.DeclKind.Argument(name="this", type=ownerType, boundedCount=""))
+                receiverType := try makeType(p, nt.Type.Pointer(toType=ownerType))
+                receiverDecl = try methodScope.registerDecl("this", decl.DeclKind.Argument(name="this", type=receiverType, boundedCount=""))
             ..
             retType := try parseType(p)
             body := try parseBody(p)
@@ -1444,8 +1787,15 @@ parseGlobalStmt(p Parser*) !nt.GlobalStmt*:
             defer qualifiedName.free()
             fullName := try strgs.concat(qualifiedName, methodName)
             defer fullName.free()
-            registered := try registerParsedDecl(p, fullName, decl.DeclKind.Function(name=fullName, returnType=retType), namePos)
-            header.id = registered.id
+            declarationName := try strgs.copy(fullName)
+            registered := try registerParsedDecl(p, fullName, decl.DeclKind.Function(name=move declarationName, returnType=retType, args=try headerDecls(header), typeParams=try headerTypeParamDecls(header)), namePos)
+            registered.declType = try makeFunctionDeclType(p, header, retType, noContext)
+            registered.isPublic = isPublic
+            registered.sourceHeader = header
+            registered.sourceBody = body
+            registered.methodOwnerType = ownerType
+            registered.receiverDecl = receiverDecl
+            header.decl = registered
             method := try makeGlStmt(p, nt.GlobalStmt.Function(header=header, retType=retType, body=body, isPublic=isPublic, noContext=noContext, isDestructor=isDestructor))
             methodNode := try makeName(p, nt.Name.Simple(name=methodName))
             ret try makeGlStmt(p, nt.GlobalStmt.Method(ownerType=ownerType, name=methodNode, methodBody=method))
@@ -1469,9 +1819,14 @@ parseGlobalStmt(p Parser*) !nt.GlobalStmt*:
                 header := try parseHeader(p, nameStr)
                 end := try p.peek()
                 try ensureKwType(p, end, tkt.KwType.NEWLINE, "expected end of line after implementation declaration", "expected: newline")
-                registered := try registerParsedDecl(p, nameStr, decl.DeclKind.Struct(name=nameStr), namePos)
-                header.id = registered.id
                 try registerHeaderFields(p, header)
+                registered := try registerParsedDecl(p, nameStr, decl.DeclKind.Struct(name=nameStr, fields=decl.emptyDeclArray(), typeParams=try headerTypeParamDecls(header), implements=newImplementedTypes()), namePos)
+                registered.declType = try makeDeclarationType(p, nameStr, registered)
+                registered.isPublic = isPublic
+                registered.sourceHeader = header
+                header.decl = registered
+                storedImplements := try copyImplementedTypes(implements)
+                registered.kind = decl.DeclKind.Struct(name=nameStr, fields=try headerDecls(header), typeParams=try headerTypeParamDecls(header), implements=move storedImplements)
                 p.pendingPublic = false
                 ret try makeGlStmt(p, nt.GlobalStmt.Struct(header=header, implements=move implements, isPublic=isPublic))
             ..
@@ -1496,17 +1851,25 @@ parseGlobalStmt(p Parser*) !nt.GlobalStmt*:
                     retType := try parseType(p)
                     body := try parseBody(p)
                     p.scope = oldScope
-                    registered := try registerParsedDecl(p, nameStr, decl.DeclKind.Function(name=nameStr, returnType=retType), namePos)
-                    header.id = registered.id
+                    registered := try registerParsedDecl(p, nameStr, decl.DeclKind.Function(name=nameStr, returnType=retType, args=try headerDecls(header), typeParams=try headerTypeParamDecls(header)), namePos)
+                    registered.declType = try makeFunctionDeclType(p, header, retType, noContext)
+                    registered.isPublic = isPublic
+                    registered.sourceHeader = header
+                    registered.sourceBody = body
+                    header.decl = registered
                     ret try makeGlStmt(p, nt.GlobalStmt.Function(header=header, retType=retType, body=body, isPublic=isPublic, noContext=noContext, isDestructor=false))
                 else:
                     if noContext:
                         try errorFatal(p, "STRUCT_MODIFIER", "noctx cannot modify a struct", "", namePos)
                     ..
                     # a struct is just a header without body
-                    registered := try registerParsedDecl(p, nameStr, decl.DeclKind.Struct(name=nameStr), namePos)
-                    header.id = registered.id
                     try registerHeaderFields(p, header)
+                    registered := try registerParsedDecl(p, nameStr, decl.DeclKind.Struct(name=nameStr, fields=decl.emptyDeclArray(), typeParams=try headerTypeParamDecls(header), implements=newImplementedTypes()), namePos)
+                    registered.declType = try makeDeclarationType(p, nameStr, registered)
+                    registered.isPublic = isPublic
+                    registered.sourceHeader = header
+                    header.decl = registered
+                    registered.kind = decl.DeclKind.Struct(name=nameStr, fields=try headerDecls(header), typeParams=try headerTypeParamDecls(header), implements=newImplementedTypes())
                     ret try makeGlStmt(p, nt.GlobalStmt.Struct(header=header, implements=newImplementedTypes(), isPublic=isPublic))
                 ..
             else:
@@ -1536,7 +1899,9 @@ parseGlobalStmt(p Parser*) !nt.GlobalStmt*:
                 if isGlobal && isConst:
                     try errorFatal(p, "GLOBAL_CONST", "global cannot modify a constant", "global storage applies to mutable variables", namePos)
                 ..
-                registered := try registerParsedDecl(p, nameStr, decl.DeclKind.Variable(name=nameStr, type=varType), namePos)
+                registered := try registerParsedDecl(p, nameStr, decl.DeclKind.Variable(name=nameStr, type=varType, initializer=initializer, isGlobal=isGlobal, isConst=isConst), namePos)
+                registered.declType = varType
+                registered.isPublic = isPublic
                 ret try makeGlStmt(p, nt.GlobalStmt.Variable(id=registered.id, name=nameStr, type=varType, initializer=initializer, isPublic=isPublic, isGlobal=isGlobal, isConst=isConst))
             ..
         ..
@@ -1743,6 +2108,8 @@ parseGlobalStmt(p Parser*) !nt.GlobalStmt*:
             isPublic := p.pendingPublic
             p.pendingPublic = false
             registered := try registerParsedDecl(p, aliasName, decl.DeclKind.Alias(name=aliasName, target=aliasType), t.pos)
+            registered.declType = aliasType
+            registered.isPublic = isPublic
             ret try makeGlStmt(p, nt.GlobalStmt.Alias(id=registered.id, name=try makeName(p, nt.Name.Simple(name=aliasName)), type=aliasType, isPublic=isPublic))
         elif t.kwType == tkt.KwType.UNION:
             if p.pendingGlobal || p.pendingConst || p.pendingNoCtx || p.pendingDestructor:
@@ -1758,6 +2125,10 @@ parseGlobalStmt(p Parser*) !nt.GlobalStmt*:
             if p.pendingGlobal || p.pendingConst || p.pendingDestructor:
                 try errorFatal(p, "EXTERN_MODIFIER", "global, const, and destr cannot modify an external function", "", t.pos)
             ..
+            isPublic := p.pendingPublic
+            p.pendingPublic = false
+            isNoCtx := p.pendingNoCtx
+            p.pendingNoCtx = false
             p.consume()
             nameTk := try p.peek()
             try ensureTkType(p, nameTk, tkt.TkType.NAME, "expected external function name", "expected: ext name(args) ReturnType")
@@ -1770,13 +2141,13 @@ parseGlobalStmt(p Parser*) !nt.GlobalStmt*:
             try registerHeaderArgs(p, header, decl.ScopeKind.Function())
             retType := try parseType(p)
             p.scope = oldScope
-            registered := try registerParsedDecl(p, nameTk.repr, decl.DeclKind.Function(name=nameTk.repr, returnType=retType), nameTk.pos)
-            header.id = registered.id
-            isPublic := p.pendingPublic
-            p.pendingPublic = false
-            isNoCtx := p.pendingNoCtx
-            p.pendingNoCtx = false
-            ret try makeGlStmt(p, nt.GlobalStmt.ExternalFunction(header=header, externalName=externalTk.repr, retType=retType, isPublic=isPublic, noContext=isNoCtx))
+            registered := try registerParsedDecl(p, nameTk.repr, decl.DeclKind.Function(name=nameTk.repr, returnType=retType, args=try headerDecls(header), typeParams=try headerTypeParamDecls(header)), nameTk.pos)
+            registered.declType = try makeFunctionDeclType(p, header, retType, true)
+            registered.externalName = externalTk.repr
+            registered.isPublic = isPublic
+            registered.sourceHeader = header
+            header.decl = registered
+            ret try makeGlStmt(p, nt.GlobalStmt.ExternalFunction(header=header, externalName=externalTk.repr, retType=retType, isPublic=isPublic, noContext=true))
         elif t.kwType == tkt.KwType.LLVM:
             if p.pendingPublic || p.pendingGlobal || p.pendingConst || p.pendingNoCtx || p.pendingDestructor:
                 try errorFatal(p, "LLVM_MODIFIER", "modifiers cannot be applied to inline LLVM declarations", "", t.pos)
@@ -1826,8 +2197,13 @@ parseProtoDecl(p Parser*) !nt.GlobalStmt*:
     p.consume()
     isPublic := p.pendingPublic
     p.pendingPublic = false
-    registered := try registerParsedDecl(p, nameTk.repr, decl.DeclKind.Proto(name=nameTk.repr), nameTk.pos)
     protoScope := try p.module.registerScope(decl.ScopeKind.Block())
+    vtableType := try makeDeclarationType(p, "ptr", none)
+    vtableField := try protoScope.registerDecl("vtable", decl.DeclKind.Field(name="vtable", type=vtableType))
+    vtableField.declType = vtableType
+    registered := try registerParsedDecl(p, nameTk.repr, decl.DeclKind.Proto(name=nameTk.repr, scope=protoScope, methods=decl.emptyDeclArray()), nameTk.pos)
+    registered.declType = try makeDeclarationType(p, nameTk.repr, registered)
+    registered.isPublic = isPublic
     opening := try p.peek()
     implements := nt.emptyNodeArray[nt.Type*]()
     if opening.type == tkt.TkType.NAME && opening.repr == "impl":
@@ -1843,6 +2219,7 @@ parseProtoDecl(p Parser*) !nt.GlobalStmt*:
     p.consume()
 
     methods := nt.emptyNodeArray[nt.ProtoMethod*]()
+    methodDecls := decl.emptyDeclArray()
     loop true:
         t := try p.peek()
         if t.kwType == tkt.KwType.PAREN_CL:
@@ -1871,13 +2248,14 @@ parseProtoDecl(p Parser*) !nt.GlobalStmt*:
         ..
         oldScope := p.scope
         try registerHeaderArgs(p, header, decl.ScopeKind.Method())
+        protoReceiverDecl decl.Decl* = none
         protoReceiverNameIdx, receiverNameErr := p.scope.names.indexOf("this")
         if receiverNameErr.ok():
             try nonFatalError(p, "DUPLICATE_ARGUMENT", "prototype arguments cannot shadow 'this'", "rename the prototype argument", t.pos)
         else:
-            protoName := try makeName(p, nt.Name.Simple(name=nameTk.repr))
-            protoType := try makeType(p, nt.Type.Named(name=protoName, id=registered.id))
-            try p.scope.registerDecl("this", decl.DeclKind.Argument(name="this", type=protoType, boundedCount=""))
+            protoType := registered.declType
+            receiverType := try makeType(p, nt.Type.Pointer(toType=protoType))
+            protoReceiverDecl = try p.scope.registerDecl("this", decl.DeclKind.Argument(name="this", type=receiverType, boundedCount=""))
         ..
         returnType := try parseType(p)
         p.scope = oldScope
@@ -1891,9 +2269,15 @@ parseProtoDecl(p Parser*) !nt.GlobalStmt*:
             qualifiedName := try strgs.concat(nameTk.repr, ".")
             defer qualifiedName.free()
             fullName := try strgs.concat(qualifiedName, t.repr)
-            methodDecl := try protoScope.registerDecl(t.repr, decl.DeclKind.Function(name=move fullName, returnType=returnType))
-            header.id = methodDecl.id
-            method := try makeProtoMethod(p, nt.ProtoMethod(id=methodDecl.id, header=header, returnType=returnType, noContext=noContext))
+            methodDecl := try protoScope.registerDecl(t.repr, decl.DeclKind.Function(name=move fullName, returnType=returnType, args=try headerDecls(header), typeParams=try headerTypeParamDecls(header)))
+            methodDecl.declType = try makeFunctionDeclType(p, header, returnType, noContext)
+            methodDecl.sourcePos = t.pos
+            methodDecl.sourceHeader = header
+            methodDecl.methodOwnerType = registered.declType
+            methodDecl.receiverDecl = protoReceiverDecl
+            header.decl = methodDecl
+            try methodDecls.pushRight(ctx.alloc, methodDecl)
+            method := try makeProtoMethod(p, nt.ProtoMethod(decl=methodDecl, header=header, returnType=returnType, noContext=noContext))
             try methods.pushRight(ctx.alloc, method)
         ..
 
@@ -1905,7 +2289,8 @@ parseProtoDecl(p Parser*) !nt.GlobalStmt*:
             try skipToListBoundary(p, tkt.KwType.PAREN_CL)
         ..
     ..
-    ret try makeGlStmt(p, nt.GlobalStmt.Proto(id=registered.id, name=nameTk.repr, scopeId=protoScope.id, implements=move implements, methods=move methods, isPublic=isPublic))
+    registered.kind = decl.DeclKind.Proto(name=nameTk.repr, scope=protoScope, methods=move methodDecls)
+    ret try makeGlStmt(p, nt.GlobalStmt.Proto(id=registered.id, name=nameTk.repr, scope=protoScope, implements=move implements, methods=move methods, isPublic=isPublic))
 ..
 
 parseUnionDecl(p Parser*) !nt.GlobalStmt*:
@@ -1914,8 +2299,9 @@ parseUnionDecl(p Parser*) !nt.GlobalStmt*:
     nameTk := try p.peek()
     try ensureTkType(p, nameTk, tkt.TkType.NAME, "expected union name", "expected: union Name(...)")
     p.consume()
-    registered := try registerParsedDecl(p, nameTk.repr, decl.DeclKind.Union(name=nameTk.repr), nameTk.pos)
     scope := try p.module.registerScope(decl.ScopeKind.Block())
+    registered := try registerParsedDecl(p, nameTk.repr, decl.DeclKind.Union(name=nameTk.repr, scope=scope, variants=decl.emptyDeclArray(), implements=newImplementedTypes()), nameTk.pos)
+    registered.declType = try makeDeclarationType(p, nameTk.repr, registered)
     opening := try p.peek()
     implements := nt.emptyNodeArray[nt.Type*]()
     if opening.type == tkt.TkType.NAME && opening.repr == "impl":
@@ -1931,6 +2317,7 @@ parseUnionDecl(p Parser*) !nt.GlobalStmt*:
     p.consume()
 
     variants := nt.emptyNodeArray[nt.Header*]()
+    variantDecls := decl.emptyDeclArray()
     loop true:
         t := try p.peek()
         if t.kwType == tkt.KwType.PAREN_CL:
@@ -1951,10 +2338,10 @@ parseUnionDecl(p Parser*) !nt.GlobalStmt*:
         header nt.Header*
         if next.kwType == tkt.KwType.PAREN_OP:
             fields := try parseTypedArgList(p)
-            header = try makeHeader(p, nt.Header(id=0, scopeId=0, name=t.repr, fields=move fields, kind=nt.HeaderKind.Plain()))
+            header = try makeHeader(p, nt.Header(decl=none, scope=none, name=t.repr, fields=move fields, kind=nt.HeaderKind.Plain()))
         else:
             emptyFields := nt.emptyNodeArray[nt.Expr*]()
-            header = try makeHeader(p, nt.Header(id=0, scopeId=0, name=t.repr, fields=move emptyFields, kind=nt.HeaderKind.Plain()))
+            header = try makeHeader(p, nt.Header(decl=none, scope=none, name=t.repr, fields=move emptyFields, kind=nt.HeaderKind.Plain()))
         ..
         unionVariantNameIdx, variantNameErr := scope.names.indexOf(t.repr)
         duplicateVariant := variantNameErr.ok()
@@ -1962,8 +2349,11 @@ parseUnionDecl(p Parser*) !nt.GlobalStmt*:
             try nonFatalError(p, "DUPLICATE_UNION_VARIANT", "union variant name is repeated", "variant names must be unique", t.pos)
         else:
             try registerHeaderFields(p, header)
-            variantDecl := try scope.registerDecl(t.repr, decl.DeclKind.UnionVariant(name=t.repr))
-            header.id = variantDecl.id
+            variantDecl := try scope.registerDecl(t.repr, decl.DeclKind.UnionVariant(name=t.repr, fields=try headerDecls(header), unionType=registered.declType))
+            variantDecl.sourcePos = t.pos
+            variantDecl.declType = try makeDeclarationType(p, t.repr, variantDecl)
+            header.decl = variantDecl
+            try variantDecls.pushRight(ctx.alloc, variantDecl)
             try variants.pushRight(ctx.alloc, header)
         ..
         delimiter := try p.peek()
@@ -1979,7 +2369,10 @@ parseUnionDecl(p Parser*) !nt.GlobalStmt*:
     ..
     isPublic := p.pendingPublic
     p.pendingPublic = false
-    ret try makeGlStmt(p, nt.GlobalStmt.Union(id=registered.id, name=nameTk.repr, scopeId=scope.id, implements=move implements, variants=move variants, isPublic=isPublic))
+    registered.isPublic = isPublic
+    storedImplements := try copyImplementedTypes(implements)
+    registered.kind = decl.DeclKind.Union(name=nameTk.repr, scope=scope, variants=move variantDecls, implements=move storedImplements)
+    ret try makeGlStmt(p, nt.GlobalStmt.Union(id=registered.id, name=nameTk.repr, scope=scope, implements=move implements, variants=move variants, isPublic=isPublic))
 ..
 
 parseEnumDecl(p Parser*) !nt.GlobalStmt*:
@@ -1991,11 +2384,13 @@ parseEnumDecl(p Parser*) !nt.GlobalStmt*:
     backing := try parseType(p)
     opening := try p.peek()
     try ensureKwType(p, opening, tkt.KwType.PAREN_OP, "expected enum value list", "expected: (")
-    registered := try registerParsedDecl(p, nameTk.repr, decl.DeclKind.Enum(name=nameTk.repr, backing=backing), nameTk.pos)
     scope := try p.module.registerScope(decl.ScopeKind.Block())
+    registered := try registerParsedDecl(p, nameTk.repr, decl.DeclKind.Enum(name=nameTk.repr, backing=backing, scope=scope, variants=decl.emptyDeclArray()), nameTk.pos)
+    registered.declType = try makeDeclarationType(p, nameTk.repr, registered)
     p.consume()
 
     variants := nt.emptyNodeArray[nt.Expr*]()
+    variantDecls := decl.emptyDeclArray()
     loop true:
         t := try p.peek()
         if t.kwType == tkt.KwType.PAREN_CL:
@@ -2017,15 +2412,18 @@ parseEnumDecl(p Parser*) !nt.GlobalStmt*:
         if duplicateVariant:
             try nonFatalError(p, "DUPLICATE_ENUM_VARIANT", "enum value name is repeated", "enum value names must be unique", t.pos)
         else:
-            variantDecl := try scope.registerDecl(t.repr, decl.DeclKind.EnumVariant(name=t.repr, type=backing))
+            variantDecl := try scope.registerDecl(t.repr, decl.DeclKind.EnumVariant(name=t.repr, type=registered.declType))
+            variantDecl.sourcePos = t.pos
+            variantDecl.declType = registered.declType
+            try variantDecls.pushRight(ctx.alloc, variantDecl)
             value nt.Expr*
             assign := try p.peek()
             if assign.kwType == tkt.KwType.EQUAL:
                 p.consume()
                 explicitValue := try parseExpression(p, 0)
-                value = try makeExpr(p, nt.Expr.VarDefAssign(type=none, name=t.repr, assignment=explicitValue, declId=variantDecl.id))
+                value = try makeExpr(p, nt.Expr.VarDefAssign(type=registered.declType, name=t.repr, assignment=explicitValue, decl=variantDecl, sourcePos=t.pos))
             else:
-                value = try makeExpr(p, nt.Expr.VarDef(type=none, name=t.repr, declId=variantDecl.id, boundedCount=""))
+                value = try makeExpr(p, nt.Expr.VarDef(type=registered.declType, name=t.repr, decl=variantDecl, boundedCount="", sourcePos=t.pos))
             ..
             try variants.pushRight(ctx.alloc, value)
         ..
@@ -2042,7 +2440,9 @@ parseEnumDecl(p Parser*) !nt.GlobalStmt*:
     ..
     isPublic := p.pendingPublic
     p.pendingPublic = false
-    ret try makeGlStmt(p, nt.GlobalStmt.Enum(id=registered.id, name=nameTk.repr, scopeId=scope.id, backing=backing, variants=move variants, isPublic=isPublic))
+    registered.isPublic = isPublic
+    registered.kind = decl.DeclKind.Enum(name=nameTk.repr, backing=backing, scope=scope, variants=move variantDecls)
+    ret try makeGlStmt(p, nt.GlobalStmt.Enum(id=registered.id, name=nameTk.repr, scope=scope, backing=backing, variants=move variants, isPublic=isPublic))
 ..
 
 registerParsedDecl(p Parser*, name str, kind decl.DeclKind, pos org.FilePos) !decl.Decl*:
@@ -2050,17 +2450,27 @@ registerParsedDecl(p Parser*, name str, kind decl.DeclKind, pos org.FilePos) !de
     if declNameErr.ok():
         try errorFatal(p, "DUPLICATE_DECL", "declaration name is already registered in this module", "declaration names must be unique", pos)
     ..
-    ret try p.module.registerDecl(name, kind)
+    registered := try p.module.registerDecl(name, kind)
+    registered.sourcePos = pos
+    ret registered
 ..
 
 registerHeaderArgs(p Parser*, header nt.Header*, kind decl.ScopeKind) !void:
-    scope := try p.module.registerScope(kind)
-    header.scopeId = scope.id
+    scope decl.Scope* = none
+    if p.scope != none:
+        scope = try p.scope.registerScope(kind)
+    else:
+        scope = try p.module.registerScope(kind)
+    ..
+    header.scope = scope
     p.scope = scope
+    try registerHeaderTypeParams(p, header, scope)
     for i := 0 to header.fields.count():
         field := try header.fields.get(i)
         localField nt.Expr
-        unsafe localField = *field
+        unsafe:
+            localField = *field
+        ..
         match localField as argument:
         case nt.Expr.VarDef:
             argumentNameIdx, argumentNameErr := scope.names.indexOf(argument.name)
@@ -2068,22 +2478,45 @@ registerHeaderArgs(p Parser*, header nt.Header*, kind decl.ScopeKind) !void:
                 try nonFatalError(p, "DUPLICATE_ARGUMENT", "argument name is repeated in the function header", "argument names must be unique", p.currPos())
             else:
                 registered := try scope.registerDecl(argument.name, decl.DeclKind.Argument(name=argument.name, type=argument.type, boundedCount=argument.boundedCount))
-                registeredField := try makeExpr(p, nt.Expr.VarDef(type=argument.type, name=argument.name, declId=registered.id, boundedCount=argument.boundedCount))
+                registered.declType = argument.type
+                registered.sourcePos = argument.sourcePos
+                registeredField := try makeExpr(p, nt.Expr.VarDef(type=argument.type, name=argument.name, decl=registered, boundedCount=argument.boundedCount, sourcePos=argument.sourcePos))
                 try header.fields.set(i, registeredField)
             ..
         else:
             try errorFatal(p, "INVALID_HEADER_FIELD", "function header contains a non-variable field", "expected a typed argument declaration", p.currPos())
         ..
     ..
+    contextNameIdx, contextNameErr := scope.names.indexOf("ctx")
+    if contextNameErr.ok():
+        try nonFatalError(p, "DUPLICATE_CONTEXT_BINDING", "function arguments cannot shadow the implicit context binding 'ctx'", "rename the argument", p.currPos())
+    else:
+        contextType := try makeImplicitContextType(p)
+        contextDecl := try scope.registerDecl("ctx", decl.DeclKind.Variable(name="ctx", type=contextType, initializer=none, isGlobal=false, isConst=false))
+        contextDecl.declType = contextType
+        contextDecl.isImplicitContext = true
+    ..
+..
+
+makeImplicitContextType(p Parser*) !nt.Type*:
+    names := nt.emptyStringArray()
+    try names.pushRight(ctx.alloc, "__magma_internal_context")
+    try names.pushRight(ctx.alloc, "Ctx")
+    name := try makeName(p, nt.Name.Composite(names=move names))
+    ret try makeType(p, nt.Type.Named(name=name, decl=none, primitive=nt.PrimitiveType.Unresolved))
 ..
 
 registerHeaderFields(p Parser*, header nt.Header*) !void:
+    oldScope := p.scope
     scope := try p.module.registerScope(decl.ScopeKind.Block())
-    header.scopeId = scope.id
+    header.scope = scope
+    try registerHeaderTypeParams(p, header, scope)
     for i := 0 to header.fields.count():
         field := try header.fields.get(i)
         localField nt.Expr
-        unsafe localField = *field
+        unsafe:
+            localField = *field
+        ..
         match localField as member:
         case nt.Expr.VarDef:
             fieldNameIdx, fieldNameErr := scope.names.indexOf(member.name)
@@ -2091,25 +2524,30 @@ registerHeaderFields(p Parser*, header nt.Header*) !void:
                 try nonFatalError(p, "DUPLICATE_FIELD", "field name is repeated in the declaration", "field names must be unique", p.currPos())
             else:
                 registered := try scope.registerDecl(member.name, decl.DeclKind.Field(name=member.name, type=member.type))
-                registeredField := try makeExpr(p, nt.Expr.VarDef(type=member.type, name=member.name, declId=registered.id, boundedCount=""))
+                registered.declType = member.type
+                registered.sourcePos = member.sourcePos
+                registeredField := try makeExpr(p, nt.Expr.VarDef(type=member.type, name=member.name, decl=registered, boundedCount="", sourcePos=member.sourcePos))
                 try header.fields.set(i, registeredField)
             ..
         else:
             try errorFatal(p, "INVALID_HEADER_FIELD", "declaration header contains a non-variable field", "expected a typed field declaration", p.currPos())
         ..
     ..
+    p.scope = oldScope
 ..
 
-registerLocalDecl(p Parser*, name str, type nt.Type*, pos org.FilePos) !u64:
+registerLocalDecl(p Parser*, name str, type nt.Type*, pos org.FilePos) !decl.Decl*:
     if p.scope == none:
-        ret 0
+        ret none
     ..
     localNameIdx, localNameErr := p.scope.names.indexOf(name)
     if localNameErr.ok():
         try errorFatal(p, "DUPLICATE_LOCAL", "local declaration name is already used in this scope", "local names must be unique within a scope", pos)
     ..
-    registered := try p.scope.registerDecl(name, decl.DeclKind.Variable(name=name, type=type))
-    ret registered.id
+    registered := try p.scope.registerDecl(name, decl.DeclKind.Variable(name=name, type=type, initializer=none, isGlobal=false, isConst=false))
+    registered.declType = type
+    registered.sourcePos = pos
+    ret registered
 ..
 
 parseUseDecl(p Parser*, isPublic bool, prune bool) !void:
@@ -2224,6 +2662,98 @@ parseUseDecl(p Parser*, isPublic bool, prune bool) !void:
     try gl.pipelines.set(storedPath, move future)
 ..
 
+addImplicitCoreImport(p Parser*) !void:
+    corePath := try mk_abs.makeAbsolute("std:core", "")
+    defer corePath.free()
+
+    if strgs.compare(p.file.path, corePath):
+        ret
+    ..
+
+    for i := 0 to p.file.imports.count():
+        imported := try p.file.imports.get(i)
+        if strgs.compare(imported, corePath):
+            ret
+        ..
+    ..
+
+    pathCopy := try strgs.copy(corePath)
+    try p.file.imports.pushRight(move pathCopy)
+    storedPath := try p.file.imports.get(p.file.imports.count() - 1)
+
+    # Reserve the path with the same lock used by explicit imports so parallel
+    # parsers share one core pipeline.
+    gl.lockFiles.lock()
+    onerror gl.lockFiles.unlock()
+    _, fileErr := gl.files.indexOf(corePath)
+    if fileErr.ok():
+        gl.lockFiles.unlock()
+        ret
+    ..
+    try gl.files.setBorrowed(corePath, none)
+    gl.lockFiles.unlock()
+
+    future := try gl.pipelineRunner(storedPath)
+    gl.lockPipelines.lock()
+    defer gl.lockPipelines.unlock()
+    try gl.pipelines.set(storedPath, move future)
+..
+
+usesImplicitContext(p Parser*) !bool:
+    for i := 0 to p.file.tokens.count():
+        token := try p.file.tokens.get(i)
+        if token.type == tkt.TkType.NAME && token.repr == "ctx":
+            ret true
+        ..
+    ..
+    ret false
+..
+
+addImplicitContextImport(p Parser*) !void:
+    contextPath := try mk_abs.makeAbsolute("std:context", "")
+    defer contextPath.free()
+    if strgs.compare(p.file.path, contextPath):
+        ret
+    ..
+
+    aliasName := "__magma_internal_context"
+    aliasIdx, aliasErr := p.file.importAlias.indexOf(aliasName)
+    if aliasErr.ok():
+        existingPath := try p.file.importAlias.get(aliasName)
+        if not strgs.compare(existingPath, contextPath):
+            throw "reserved implicit context alias conflicts with a source import"
+        ..
+    else:
+        try p.file.importAlias.set(aliasName, try strgs.copy(contextPath))
+    ..
+
+    for i := 0 to p.file.imports.count():
+        imported := try p.file.imports.get(i)
+        if strgs.compare(imported, contextPath):
+            ret
+        ..
+    ..
+
+    pathCopy := try strgs.copy(contextPath)
+    try p.file.imports.pushRight(move pathCopy)
+    storedPath := try p.file.imports.get(p.file.imports.count() - 1)
+
+    gl.lockFiles.lock()
+    onerror gl.lockFiles.unlock()
+    _, fileErr := gl.files.indexOf(contextPath)
+    if fileErr.ok():
+        gl.lockFiles.unlock()
+        ret
+    ..
+    try gl.files.setBorrowed(contextPath, none)
+    gl.lockFiles.unlock()
+
+    future := try gl.pipelineRunner(storedPath)
+    gl.lockPipelines.lock()
+    defer gl.lockPipelines.unlock()
+    try gl.pipelines.set(storedPath, move future)
+..
+
 pub run(f fctx.FileCtx*) !void:
     pCtx := try initCtx(f)
     p := addrof pCtx
@@ -2248,11 +2778,24 @@ pub run(f fctx.FileCtx*) !void:
     if p.errors.count() != 0:
         throw "parser encountered errors"
     ..
+
+    try addImplicitCoreImport(p)
+    if try usesImplicitContext(p):
+        try addImplicitContextImport(p)
+    ..
 ..
 
 initCtx(f fctx.FileCtx*) !Parser:
     try decl.initResolver()
     module := try decl.registerModule(f.path)
+
+    corePath := try mk_abs.makeAbsolute("std:core", "")
+    if strgs.compare(f.path, corePath):
+        decl.setImplicitCoreModule(module)
+    ..
+    corePath.free()
+
+    f.module = module
 
     ret Parser(
         file=f,

@@ -372,6 +372,7 @@ walkInner(root str, visit fn(str, bool) !void) !void:
         borrowed := strings.fromCstrNoCopy(name)
         if strings.compare(borrowed, ".") == false && strings.compare(borrowed, "..") == false:
             child := try join(root, borrowed)
+            onerror child.free()
             isDirectory bool = raw[18] == 4
             try visit(child, isDirectory)
             if isDirectory:

@@ -9,6 +9,7 @@ use "std:slices" as slices
 use "std:errors" as errors
 use "std:cast" as cast
 use "std:checked" as checked
+use "std:builder" as builder
 
 ext ext_unix_fork fork() c.int
 ext ext_unix_execvp execvp(file u8*, arguments ptr) c.int
@@ -16,6 +17,10 @@ ext ext_unix_execve execve(file u8*, arguments ptr, environment ptr) c.int
 ext ext_unix_waitpid waitpid(pid c.int, status c.int*, options c.int) c.int
 ext ext_unix_kill kill(pid c.int, signal c.int) c.int
 ext ext_unix_exit _exit(status c.int) void
+ext ext_unix_pipe pipe(descriptors c.int*) c.int
+ext ext_unix_dup2 dup2(source c.int, destination c.int) c.int
+ext ext_unix_close close(descriptor c.int) c.int
+ext ext_unix_read read(descriptor c.int, buffer ptr, count u64) i64
 
 pub Process(
     pid i32
@@ -91,6 +96,8 @@ pub spawn(executable str, arguments str[]) !$Process:
         ext_unix_exit(127)
     ..
     freeArguments(argv, initialized)
+    argv = none
+    initialized = 0
     if pid < 0:
         throw errors.failure("fork failed")
     ..
@@ -136,9 +143,94 @@ pub spawnWithEnv(executable str, arguments str[], environment str[]) !$Process:
     ..
     freeArguments(argv, initialized)
     freeArguments(envp, envInitialized)
+    argv = none
+    envp = none
+    initialized = 0
+    envInitialized = 0
     if pid < 0: throw errors.failure("fork failed") ..
       ret Process(pid=pid, finished=false, exitCode=0)
     ..
+..
+
+# Executes a child and returns its complete standard output. Standard error is
+# inherited. Arguments remain separate argv entries and are never shell parsed.
+pub capture(executable str, arguments str[]) !$str:
+    if executable.countBytes() == 0 || containsNull(executable):
+        throw errors.invalidArgument("process executable is empty or contains a null byte")
+    ..
+    count := slices.count(arguments)
+    for i u64 = 0 to count:
+        if containsNull(arguments[i]):
+            throw errors.invalidArgument("process argument contains a null byte")
+        ..
+    ..
+    a := heap.allocator()
+    argvCount := try checked.uAdd(count, 2)
+    argv u8** = try a.allocT[u8*](argvCount)
+    initialized u64 = 0
+    onerror freeArguments(argv, initialized)
+    executableCopy := try strings.toCstr(executable)
+    unsafe:
+        argv[0] = executableCopy
+        initialized = 1
+        for i u64 = 0 to count:
+            argv[i + 1] = try strings.toCstr(arguments[i])
+            initialized = initialized + 1
+        ..
+        argv[count + 1] = none
+    ..
+
+    descriptors := [2]c.int
+    if ext_unix_pipe(cast.reinterpret[c.int](slices.toPtr(descriptors))) != 0:
+        throw errors.failure("pipe failed while capturing process output")
+    ..
+    pid := ext_unix_fork()
+    if pid == 0:
+        ext_unix_close(descriptors[0])
+        if ext_unix_dup2(descriptors[1], 1) < 0:
+            ext_unix_exit(127)
+        ..
+        ext_unix_close(descriptors[1])
+        ext_unix_execvp(executableCopy, argv)
+        ext_unix_exit(127)
+    ..
+    freeArguments(argv, initialized)
+    argv = none
+    initialized = 0
+    if pid < 0:
+        ext_unix_close(descriptors[0])
+        ext_unix_close(descriptors[1])
+        throw errors.failure("fork failed while capturing process output")
+    ..
+    ext_unix_close(descriptors[1])
+
+    output := try builder.new()
+    defer output.free()
+    buffer := [4096]u8
+    loop true:
+        received := ext_unix_read(descriptors[0], slices.toPtr(buffer), 4096)
+        if received == 0:
+            break
+        ..
+        if received < 0:
+            ext_unix_close(descriptors[0])
+            status i32 = 0
+            ext_unix_waitpid(pid, addrof status, 0)
+            throw errors.failure("read failed while capturing process output")
+        ..
+        chunk := strings.fromPtrNoCopy(slices.toPtr(buffer), cast.itou(received))
+        try output.appendCopy(chunk)
+    ..
+    ext_unix_close(descriptors[0])
+
+    status i32 = 0
+    if ext_unix_waitpid(pid, addrof status, 0) < 0:
+        throw errors.failure("waitpid failed while capturing process output")
+    ..
+    if decodeStatus(status) != 0:
+        throw errors.failure("captured process exited unsuccessfully")
+    ..
+    ret try output.build()
 ..
 
 pub isFinished(process Process*) !bool:

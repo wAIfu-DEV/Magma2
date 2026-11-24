@@ -26,6 +26,8 @@ global SevToRepr := [Severity._END]str(
 pub CompErr(
     file fctx.FileCtx*
     org origin.Origin
+    relatedFile fctx.FileCtx*
+    relatedPos origin.FilePos
     code str
     msg str
     help str
@@ -85,6 +87,18 @@ CompErr.writeTo(w wr.Writer) !void:
     if this.help != "":
         w.write("help: ")
         w.writeLn(this.help)
+    ..
+    if this.relatedFile != none:
+        w.write("related location: ")
+        w.write(this.relatedFile.path)
+        w.write(":l")
+        w.writeUint64(this.relatedPos.line+1)
+        w.write(":c")
+        w.writeUint64(this.relatedPos.column+1)
+        w.writeLn("")
+        try writeFileLine(w, this.relatedFile, this.relatedPos.line-1)
+        try writeFileLine(w, this.relatedFile, this.relatedPos.line)
+        try writeFileLine(w, this.relatedFile, this.relatedPos.line+1)
     ..
     w.writeLn("")
 ..

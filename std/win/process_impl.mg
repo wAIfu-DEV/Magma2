@@ -13,6 +13,7 @@ use "std:cast" as cast
 use "std:memory" as memory
 use "std:checked" as checked
 use "std:utf16" as utf16
+use "std:builder" as builder
 
 ext ext_win32_CreateProcessW CreateProcessW(applicationName win.LPCWSTR, commandLineValue win.LPWSTR, processAttributes win.LPVOID, threadAttributes win.LPVOID, inheritHandles win.BOOL, creationFlags win.DWORD, environment win.LPVOID, currentDirectory win.LPCWSTR, startupInfo win.LPVOID, processInformation win.LPVOID) win.BOOL
 ext ext_win32_WaitForSingleObject WaitForSingleObject(handle win.HANDLE, milliseconds win.DWORD) win.DWORD
@@ -20,6 +21,10 @@ ext ext_win32_GetExitCodeProcess GetExitCodeProcess(handle win.HANDLE, exitCode 
 ext ext_win32_TerminateProcess TerminateProcess(handle win.HANDLE, exitCode win.UINT) win.BOOL
 ext ext_win32_CloseHandle CloseHandle(handle win.HANDLE) win.BOOL
 ext ext_win32_GetLastError GetLastError() win.DWORD
+ext ext_win32_CreatePipe CreatePipe(readHandle ptr*, writeHandle ptr*, securityAttributes ptr, size win.DWORD) win.BOOL
+ext ext_win32_SetHandleInformation SetHandleInformation(handle ptr, mask win.DWORD, flags win.DWORD) win.BOOL
+ext ext_win32_GetStdHandle GetStdHandle(kind i32) ptr
+ext ext_win32_ReadFile ReadFile(handle ptr, buffer ptr, bytesToRead win.DWORD, bytesRead win.DWORD*, overlapped ptr) win.BOOL
 
 StartupInfo(
     cb u32
@@ -47,6 +52,12 @@ ProcessInformation(
     thread ptr
     processId u32
     threadId u32
+)
+
+SecurityAttributes(
+    length u32
+    descriptor ptr
+    inheritHandle u32
 )
 
 pub Process(
@@ -206,6 +217,84 @@ pub spawnWithEnv(executable str, arguments str[], environment str[]) !$Process:
     if ok == 0: throw errors.native(ext_win32_GetLastError(), "CreateProcessW failed") ..
     ext_win32_CloseHandle(information.thread)
     ret Process(handle=information.process)
+..
+
+# Executes a child and returns its complete standard output. Standard error is
+# inherited. Arguments remain separate command-line values, never shell text.
+pub capture(executable str, arguments str[]) !$str:
+    if executable.countBytes() == 0 || containsNull(executable):
+        throw errors.invalidArgument("process executable is empty or contains a null byte")
+    ..
+    for i u64 = 0 to slices.count(arguments):
+        if containsNull(arguments[i]):
+            throw errors.invalidArgument("process argument contains a null byte")
+        ..
+    ..
+    a := heap.allocator()
+    line := try commandLine(a, executable, arguments)
+    defer line.free()
+    line16 := try utf8.utf8To16NT(line)
+    defer a.free(slices.toPtr(line16))
+
+    security := SecurityAttributes(length=cast.u64to32(sizeof SecurityAttributes), descriptor=none, inheritHandle=1)
+    readHandle ptr = none
+    writeHandle ptr = none
+    if ext_win32_CreatePipe(addrof readHandle, addrof writeHandle, addrof security, 0) == 0:
+        throw errors.native(ext_win32_GetLastError(), "CreatePipe failed")
+    ..
+    if ext_win32_SetHandleInformation(readHandle, 1, 0) == 0:
+        ext_win32_CloseHandle(readHandle)
+        ext_win32_CloseHandle(writeHandle)
+        throw errors.native(ext_win32_GetLastError(), "SetHandleInformation failed")
+    ..
+
+    startup := memory.zeroValue[StartupInfo]()
+    startup.cb = cast.u64to32(sizeof StartupInfo)
+    startup.flags = 0x100
+    startup.stdInput = ext_win32_GetStdHandle(-10)
+    startup.stdOutput = writeHandle
+    startup.stdError = ext_win32_GetStdHandle(-12)
+    information ProcessInformation
+    if ext_win32_CreateProcessW(none, slices.toPtr(line16), none, none, 1, 0, none, none, addrof startup, addrof information) == 0:
+        code := ext_win32_GetLastError()
+        ext_win32_CloseHandle(readHandle)
+        ext_win32_CloseHandle(writeHandle)
+        throw errors.native(code, "CreateProcessW failed")
+    ..
+    ext_win32_CloseHandle(information.thread)
+    ext_win32_CloseHandle(writeHandle)
+
+    output := try builder.new()
+    defer output.free()
+    buffer := [4096]u8
+    loop true:
+        bytesRead u32 = 0
+        if ext_win32_ReadFile(readHandle, slices.toPtr(buffer), 4096, addrof bytesRead, none) == 0:
+            errorCode := ext_win32_GetLastError()
+            if errorCode == 109:
+                break
+            ..
+            ext_win32_CloseHandle(readHandle)
+            ext_win32_TerminateProcess(information.process, 1)
+            ext_win32_WaitForSingleObject(information.process, 0xFFFFFFFF)
+            ext_win32_CloseHandle(information.process)
+            throw errors.native(errorCode, "ReadFile failed while capturing process output")
+        ..
+        if bytesRead == 0:
+            break
+        ..
+        chunk := strings.fromPtrNoCopy(slices.toPtr(buffer), cast.u32to64(bytesRead))
+        try output.appendCopy(chunk)
+    ..
+    ext_win32_CloseHandle(readHandle)
+    child := Process(handle=information.process)
+    exitCode := try await(addrof child)
+    result := try output.build()
+    if exitCode != 0:
+        result.free()
+        throw errors.failure("captured process exited unsuccessfully")
+    ..
+    ret move result
 ..
 
 pub isFinished(process Process*) !bool:

@@ -31,20 +31,25 @@ pub makeAbsolute(inPath str, fromDir str) !$str:
         tmpPath = try strgs.copy(inPath)
     ..
 
-    if true:
-        onerror tmpPath.free()
+    extension str, extensionError error = path.extension(tmpPath)
+    if extensionError.nok():
+        tmpPath.free()
+        throw extensionError
+    ..
+    defer extension.free()
 
-        extension := try path.extension(tmpPath)
-        defer extension.free()
-
-        if extension != ".mg":
-            if extension == "": # allows empty exts to be infered as magma files
-                tmp2 := try strgs.concat(tmpPath, ".mg")
+    if extension != ".mg":
+        if extension == "": # allows empty exts to be infered as magma files
+            tmp2 str, tmp2Error error = strgs.concat(tmpPath, ".mg")
+            if tmp2Error.nok():
                 tmpPath.free()
-                tmpPath = move tmp2
-            else:
-                throw "invalid extension"
+                throw tmp2Error
             ..
+            tmpPath.free()
+            tmpPath = move tmp2
+        else:
+            tmpPath.free()
+            throw "invalid extension"
         ..
     ..
 
@@ -57,7 +62,11 @@ pub makeAbsolute(inPath str, fromDir str) !$str:
 
     parts := [3]str(gl.cwd, fromDir, tmpPath)
 
-    baseDir $str = try path.join(parts)
+    baseDir str, baseDirError error = path.join(parts)
+    if baseDirError.nok():
+        tmpPath.free()
+        throw baseDirError
+    ..
     onerror baseDir.free()
 
     tmpPath.free()

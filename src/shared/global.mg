@@ -7,6 +7,8 @@ use "std:atomic" atomic
 use "std:adaptive_spinlock" adsl
 use "std:stable_list" sl
 use "std:writer" wr
+use "std:list" ls
+use "std:buffered" buf
 
 use "../helper/logger" lg
 use "node_types" nt
@@ -17,6 +19,8 @@ pub alias ModuleID = str
 pub const UNSET str = "unset"
 
 pub global logger lg.Logger
+pub global stdout buf.Writer
+pub global stdin buf.Reader
 
 pub global cwd str = UNSET
 pub global stdLibRoot str = UNSET
@@ -33,6 +37,9 @@ pub global lockFiles lck.Locker
 pub global importedFiles sl.StableList[fctx.FileCtx]
 pub global lockImportedFiles lck.Locker
 pub global lockStdout lck.Locker
+pub global timingLex ls.List[u64]
+pub global timingParse ls.List[u64]
+pub global lockTimings lck.Locker
 
 pub global pipelineRunner fn(str) !$future.Future[error]
 
@@ -50,6 +57,9 @@ pub initGlobal() !void:
     importedFiles = try sl.new[fctx.FileCtx](ctx.alloc, none)
     lockImportedFiles = adsl.new().proto()
     lockStdout = adsl.new().proto()
+    timingLex = try ls.new[u64](ctx.alloc, none)
+    timingParse = try ls.new[u64](ctx.alloc, none)
+    lockTimings = adsl.new().proto()
 
     moduleNames = try hm.new[ModuleID](16, none)
     lockModuleNames = adsl.new().proto()
@@ -76,6 +86,7 @@ destr TempLogger.end() !void:
     if this.x == 0:
         ret
     ..
+    try stdout.flush()
     lockStdout.unlock()
 ..
 

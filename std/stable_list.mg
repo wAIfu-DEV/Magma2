@@ -6,6 +6,7 @@ use "std:checked" as checked
 use "std:errors" as errors
 use "std:list" as ls
 use "std:memory" as mem
+use "std:footgun" as fg
 
 const PAGE_SIZE u64 = 256
 
@@ -39,19 +40,39 @@ StableList[T].count() u64:
 # @ownership Consumes value.
 # @complexity O(1) amortized; allocates a page every PAGE_SIZE elements.
 StableList[T].push(value $T) !u64:
-    newLength := try checked.uAdd(this.length, 1)
+    newLength u64, lengthError error = checked.uAdd(this.length, 1)
+    if lengthError.nok():
+        fg.drop[T](move value)
+        throw lengthError
+    ..
     if this.length % PAGE_SIZE == 0:
-        pageBytes := try checked.byteCount[T](PAGE_SIZE)
-        page := try this.allocator.allocT[T](PAGE_SIZE)
-        onerror this.allocator.free(page)
+        pageBytes u64, bytesError error = checked.byteCount[T](PAGE_SIZE)
+        if bytesError.nok():
+            fg.drop[T](move value)
+            throw bytesError
+        ..
+        page T*, allocationError error = this.allocator.allocT[T](PAGE_SIZE)
+        if allocationError.nok():
+            fg.drop[T](move value)
+            throw allocationError
+        ..
         mem.zero(page, pageBytes)
-        try this.pages.pushRight(move page)
+        pageSlot u64, pageSlotError error = this.pages.expandRight()
+        if pageSlotError.nok():
+            this.allocator.free(page)
+            fg.drop[T](move value)
+            throw pageSlotError
+        ..
+        pageSlots T*[] = this.pages.array.view()
+        unsafe: pageSlots[pageSlot] = move page ..
     ..
 
     pageIndex := this.length / PAGE_SIZE
     offset := this.length % PAGE_SIZE
-    page := try this.pages.get(pageIndex)
+    pageSlots T*[] = this.pages.array.view()
+    page T* = none
     unsafe:
+        page = pageSlots[pageIndex]
         page[offset] = move value
     ..
 

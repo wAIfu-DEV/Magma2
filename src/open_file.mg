@@ -34,7 +34,11 @@ pub openFile(path str) !$fctx.FileCtx:
 
     modName := try parseFirstLn(firstLn)
 
-    fc := try fctx.new()
+    fc fctx.FileCtx, contextError error = fctx.new()
+    if contextError.nok():
+        modName.free()
+        throw contextError
+    ..
     fc.path = path
     fc.modName = move modName
     fc.content = try rd.read(f.count()) # TODO: add readall util

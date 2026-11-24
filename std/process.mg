@@ -26,6 +26,11 @@ SpawnTask(
     hasExternal bool
 )
 
+CaptureTask(
+    executable str
+    arguments str[]
+)
+
 # Starts executable with arguments. The executable becomes argv[0], so callers
 # should not repeat it in arguments. The child inherits the parent's environment
 # and standard streams.
@@ -80,6 +85,23 @@ destr Process.kill() !void:
 pub exec(executable str, arguments str[]) !u32:
     child := try spawn(executable, arguments)
     ret try child.await()
+..
+
+# Executes a child and captures its standard output as an owned string. The
+# child's standard error is inherited and arguments are never shell parsed.
+pub capture(executable str, arguments str[]) !$str:
+    ret try impl_process.capture(executable, arguments)
+..
+
+runCaptureTask(task CaptureTask*, signal abort.Signal) !$str:
+    try signal.check()
+    ret try capture(task.executable, task.arguments)
+..
+
+# Captures child standard output asynchronously on the current executor.
+pub captureAsync(executable str, arguments str[]) !$future.Future[str]:
+    task := CaptureTask(executable=executable, arguments=arguments)
+    ret try future.newAbort[str, CaptureTask](ctx.exec, runCaptureTask, task)
 ..
 
 checkSignals(task SpawnTask*, signal abort.Signal) !bool:

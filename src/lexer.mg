@@ -244,6 +244,7 @@ errorFatal(l Lexer*, code str, msg str, help str, pos org.FilePos) !void:
     l.errors.pushRight(comperr.CompErr(
         sev=comperr.Severity.ERROR, code=code, msg=msg, help=help,
         file=l.file, org=org.Origin(filePath=l.file.path, position=pos),
+        relatedFile=none, relatedPos=org.FilePos(line=0, column=0),
     ))
     throw msg
 ..
