@@ -236,8 +236,9 @@ HashMap[T].set(key str, item $T) !void:
 ..
 
 HashMap[T].setBorrowed(key str, item T) !void:
+    temp $T = item
     unsafe:
-        this.set(key, move item)
+        this.set(key, move temp)
     ..
 ..
 

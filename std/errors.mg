@@ -135,8 +135,9 @@ pub noctx printTrace(e error) void:
 # Prints an uncaught error and its propagation trace without requiring an
 # initialized Magma context.
 pub noctx printUncaught(e error) void:
-    format := "Uncaught Error: %u '%.*s'\n"
-    ext_error_printf(format.__data, cast.u32to64(e.code()), cast.u16to64(e.__messageLength), cast.ptou(e.__message), 0, 0, 0)
+    name := toStr(e)
+    format := "Uncaught Error: %.*s (%.*s)\n"
+    ext_error_printf(format.__data, name.__byteCount, cast.ptou(name.__data), cast.u16to64(e.__messageLength), cast.ptou(e.__message), 0, 0)
     printTrace(e)
 ..
 
@@ -163,7 +164,7 @@ pub hasCode(e error, expected u32) bool:
 # @returns error type as string
 # @example
 #   label := errors.toStr(failure)
-pub toStr(e error) str:
+pub noctx toStr(e error) str:
     c u32 = e.code()
 
     if c == ERR_OK:

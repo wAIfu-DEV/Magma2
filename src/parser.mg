@@ -18,6 +18,7 @@ use "make_absolute" mk_abs
 use "shared/global" gl
 use "helper/logger" log
 
+
 Parser(
     file fctx.FileCtx*,
     module decl.Module*,
@@ -2783,6 +2784,53 @@ pub run(f fctx.FileCtx*) !void:
     if try usesImplicitContext(p):
         try addImplicitContextImport(p)
     ..
+    isMainPackage := strgs.compare(f.path, gl.mainUniqueName)
+    if isMainPackage && (try hasMainEntryPoint(f)):
+        try addImplicitImport(p, "std:context_default")
+        try addImplicitImport(p, "std:errors")
+    ..
+..
+
+hasMainEntryPoint(file fctx.FileCtx*) !bool:
+    for i := 0 to file.astRoot.statements.count():
+        statement := nt.loadGlobalStatementNode(try file.astRoot.statements.get(i))
+        match addrof statement as globalValue:
+        case nt.GlobalStmt.Function:
+            if strgs.compare(globalValue.header.name, "main"):
+                ret true
+            ..
+        else:
+            continue
+        ..
+    ..
+    ret false
+..
+
+addImplicitImport(p Parser*, modulePath str) !void:
+    absolutePath := try mk_abs.makeAbsolute(modulePath, "")
+    defer absolutePath.free()
+    for i := 0 to p.file.imports.count():
+        existing := try p.file.imports.get(i)
+        if strgs.compare(existing, absolutePath):
+            ret
+        ..
+    ..
+    ownedPath := try strgs.copy(absolutePath)
+    try p.file.imports.pushRight(move ownedPath)
+    storedPath := try p.file.imports.get(p.file.imports.count() - 1)
+    gl.lockFiles.lock()
+    onerror gl.lockFiles.unlock()
+    _, fileError := gl.files.indexOf(absolutePath)
+    if fileError.ok():
+        gl.lockFiles.unlock()
+        ret
+    ..
+    try gl.files.setBorrowed(absolutePath, none)
+    gl.lockFiles.unlock()
+    future := try gl.pipelineRunner(storedPath)
+    gl.lockPipelines.lock()
+    defer gl.lockPipelines.unlock()
+    try gl.pipelines.set(storedPath, move future)
 ..
 
 initCtx(f fctx.FileCtx*) !Parser:

@@ -500,13 +500,17 @@ ThreadPool.submit(entry fn(ptr) u64, context ptr) !void:
     state State* = this.state
     state.lock.lock()
     onerror state.lock.unlock()
-    throw state.fatalError
+    if state.fatalError.nok():
+        throw state.fatalError
+    ..
     if state.stopping:
         throw errors.failure("thread pool is stopping")
     ..
     if state.count == state.capacity:
         grown bool, growErr error = growQueue(state)
-        throw growErr
+        if growErr.nok():
+            throw growErr
+        ..
     ..
     nextPending := try checked.uAdd(state.pending, 1)
     # Queueing this task would consume more workers than are currently idle.
@@ -545,7 +549,9 @@ ThreadPool.wait() !void:
     loop waiting:
         state.lock.lock()
         onerror state.lock.unlock()
-        throw state.fatalError
+        if state.fatalError.nok():
+            throw state.fatalError
+        ..
         waiting = state.pending != 0
         if waiting:
             state.idleWaiters = state.idleWaiters + 1
@@ -556,7 +562,9 @@ ThreadPool.wait() !void:
             state.lock.lock()
             state.idleWaiters = state.idleWaiters - 1
             state.lock.unlock()
-            throw waitErr
+            if waitErr.nok():
+                throw waitErr
+            ..
         ..
     ..
 ..

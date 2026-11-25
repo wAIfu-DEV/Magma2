@@ -2513,7 +2513,7 @@ checkExpression(c Checker*, expression nt.Expr*, scope dclr.Scope*) !nt.Type*:
         ret valueType
     case nt.Expr.CompilerKnown:
         if value.name == "ERROR_TRACE_SLOTS":
-            value.resolvedValue = "256"
+            value.resolvedValue = "1024"
         else:
             throw try strgs.concat("unknown compiler-known constant: ", value.name)
         ..

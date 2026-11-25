@@ -13,13 +13,14 @@ use "std:cast" cast
 use "std:builder" builder
 use "std:process" proc
 use "std:future" future
+use "std:time" time
 use "std:abort" abort
 use "std:errors" errs
 use "std:list" ls
 
 use "shared/filectx" fctx
 
-const SCHEMA str = "magma-bitcode-cache-v5"
+const SCHEMA str = "magma-bitcode-cache-v6"
 const DIGEST_HEX_BYTES u64 = 40
 
 pub Cache(
@@ -43,6 +44,7 @@ AssemblyWork(
     llvmText str
     optimizationLevel u64
 )
+
 
 hexByte(value u8) u8:
     if value < 10:
@@ -264,6 +266,7 @@ cleanupString(value $str) void:
     value.free()
 ..
 
+
 appendLinkField(output builder.Builder*, value str) !void:
     length := try strconv.formatUint(value.countBytes())
     defer length.free()
@@ -358,9 +361,9 @@ pub lookup(cache Cache*, file fctx.FileCtx*, interfaceFingerprint str) !$Lookup:
     prefix := try strings.substring(metadata, 0, expected.countBytes())
     defer prefix.free()
     if strings.compare(prefix, expected) == false:
-        # Source and public-interface digests occupy fixed-width fields at the
-        # end of the prefix, immediately before the bitcode checksum.
-        interfaceStart := metadata.countBytes() - (DIGEST_HEX_BYTES * 2 + 2)
+        # The lowering fingerprint may include a module-role suffix, so use
+        # its actual length when locating the fixed-width source digest.
+        interfaceStart := expected.countBytes() - interfaceFingerprint.countBytes() - 1
         sourceStart := interfaceStart - (DIGEST_HEX_BYTES + 1)
         storedSourceDigest := try strings.substring(metadata, sourceStart, sourceStart + DIGEST_HEX_BYTES)
         defer storedSourceDigest.free()
@@ -541,12 +544,34 @@ pub assembleAsync(cache Cache*, file fctx.FileCtx*, interfaceFingerprint str, ll
 
 # Links the complete checked graph from independent bitcode units. Reuses the
 # linked object when the ordered bitcode inputs and link settings match.
-pub linkModules(cache Cache*, files fctx.FileArray, optimizationLevel u64, threadCount u64) !void:
-    outputName := "program.o"
+pub linkModulesToIR(cache Cache*, files fctx.FileArray, outputPath str) !void:
+    arguments := try ls.new[str](ctx.alloc, cleanupString)
+    defer arguments.free()
+    try arguments.pushRight(try strings.copy("-S"))
+    try arguments.pushRight(try strings.copy("-o"))
+    try arguments.pushRight(try strings.copy(outputPath))
+    for i := 0 to files.count():
+        file := try files.get(i)
+        bitcodePath := try moduleBitcodePath(cache, file)
+        try arguments.pushRight(move bitcodePath)
+    ..
+    linker := try proc.execAsync("llvm-link", arguments.view())
+    exitCode := try linker.await()
+    if exitCode != 0:
+        throw "llvm-link failed while producing LLVM IR"
+    ..
+..
+
+pub linkModules(cache Cache*, files fctx.FileArray, optimizationLevel u64, threadCount u64, outputPath str, produceExecutable bool) !void:
     executable := "clang"
     linkInputBuilder := try builder.new()
     defer linkInputBuilder.free()
-    try appendLinkField(addrof linkInputBuilder, "magma-thinlto-link-v1")
+    try appendLinkField(addrof linkInputBuilder, "magma-thinlto-link-v5")
+    linkMode := "relocatable"
+    if produceExecutable:
+        linkMode = "executable"
+    ..
+    try appendLinkField(addrof linkInputBuilder, linkMode)
     try appendLinkField(addrof linkInputBuilder, cache.targetTriple)
     optimization := try strconv.formatUint(optimizationLevel)
     defer optimization.free()
@@ -568,7 +593,11 @@ pub linkModules(cache Cache*, files fctx.FileArray, optimizationLevel u64, threa
     defer linkKey.free()
     keyedNamePrefix := try strings.concat("program-", linkKey)
     defer keyedNamePrefix.free()
-    keyedName := try strings.concat(keyedNamePrefix, ".o")
+    outputSuffix := ".o"
+    if produceExecutable:
+        outputSuffix = ".exe"
+    ..
+    keyedName := try strings.concat(keyedNamePrefix, outputSuffix)
     defer keyedName.free()
     cachedOutputPath := try join2(cache.root, keyedName)
     defer cachedOutputPath.free()
@@ -576,14 +605,20 @@ pub linkModules(cache Cache*, files fctx.FileArray, optimizationLevel u64, threa
     defer temporaryName.free()
     temporaryPath := try join2(cache.root, temporaryName)
     defer temporaryPath.free()
-    outputPath := try join2(cache.root, outputName)
-    defer outputPath.free()
-
     cachedInfo fs.Metadata, cachedInfoError error = fs.metadata(cachedOutputPath)
     if cachedInfoError.ok() && cachedInfo.size() > 0:
-        removeQuietly(temporaryPath)
-        try fs.copyFile(cachedOutputPath, temporaryPath)
-        try fs.replace(temporaryPath, outputPath)
+        # Stage beside the destination and atomically replace it. Copying
+        # directly truncates outputPath, which fails with ETXTBSY when this
+        # compiler is itself running from the default output path ("out").
+        outputTempSuffix := try strconv.formatUint(time.ticks())
+        defer outputTempSuffix.free()
+        outputTempName := try strings.concat(".magma-tmp-", outputTempSuffix)
+        defer outputTempName.free()
+        outputTempPath := try strings.concat(outputPath, outputTempName)
+        defer outputTempPath.free()
+        removeQuietly(outputTempPath)
+        try fs.copyFile(cachedOutputPath, outputTempPath)
+        try fs.replace(outputTempPath, outputPath)
         ret
     ..
 
@@ -601,12 +636,14 @@ pub linkModules(cache Cache*, files fctx.FileArray, optimizationLevel u64, threa
     thinLtoJobsArgument := try strings.concat("-Wl,--thinlto-jobs=", thinLtoJobs)
     defer thinLtoJobsArgument.free()
     try arguments.pushRight(try strings.copy(thinLtoJobsArgument))
-    try arguments.pushRight(try strings.copy("-r"))
+    if produceExecutable == false:
+        try arguments.pushRight(try strings.copy("-r"))
+    ..
     optimizationFlag := try strings.concat("-O", optimization)
     defer optimizationFlag.free()
     try arguments.pushRight(try strings.copy(optimizationFlag))
     try arguments.pushRight(try strings.copy("-o"))
-    try arguments.pushRight(try strings.copy(temporaryPath))
+    try arguments.pushRight(try strings.copy(outputPath))
     for i := 0 to files.count():
         file := try files.get(i)
         digest := try linkInputDigests.get(i)
@@ -615,10 +652,8 @@ pub linkModules(cache Cache*, files fctx.FileArray, optimizationLevel u64, threa
     linker := try proc.execAsync(executable, arguments.view())
     exitCode := try linker.await()
     if exitCode != 0:
-        removeQuietly(temporaryPath)
-        throw "ThinLTO link failed while producing a relocatable object"
+        throw "ThinLTO link failed while producing output"
     ..
+    try fs.copyFile(outputPath, temporaryPath)
     try fs.replace(temporaryPath, cachedOutputPath)
-    try fs.copyFile(cachedOutputPath, temporaryPath)
-    try fs.replace(temporaryPath, outputPath)
 ..

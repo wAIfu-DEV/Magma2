@@ -20,6 +20,7 @@ enum LxMode u8(
     DEFAULT=0
     STRING
     COMMENT
+    MULTILINE_COMMENT
     NUMBER
     HEXNUM
 )
@@ -213,13 +214,13 @@ Lexer.pushTokenBuff() !void:
 ..
 
 global escapeTable := ['w']utf.Codepoint(
-    `a`=utf.Codepoint(width=1, value=`a`),
-    `b`=utf.Codepoint(width=1, value=`b`),
-    `f`=utf.Codepoint(width=1, value=`f`),
-    `n`=utf.Codepoint(width=1, value=`n`),
-    `r`=utf.Codepoint(width=1, value=`r`),
-    `t`=utf.Codepoint(width=1, value=`t`),
-    `v`=utf.Codepoint(width=1, value=`v`),
+    `a`=utf.Codepoint(width=1, value=`\a`),
+    `b`=utf.Codepoint(width=1, value=`\b`),
+    `f`=utf.Codepoint(width=1, value=`\f`),
+    `n`=utf.Codepoint(width=1, value=`\n`),
+    `r`=utf.Codepoint(width=1, value=`\r`),
+    `t`=utf.Codepoint(width=1, value=`\t`),
+    `v`=utf.Codepoint(width=1, value=`\v`),
     `\\`=utf.Codepoint(width=1, value=`\\`),
     `'`=utf.Codepoint(width=1, value=`'`),
     `"`=utf.Codepoint(width=1, value=`"`),
@@ -510,6 +511,25 @@ pub run(f fctx.FileCtx*) !$ls.List[tkt.Token]:
 
         l.pos.column = l.pos.column+1
 
+        # Multiline comments preserve line boundaries for the parser.
+        if l.mode == LxMode.MULTILINE_COMMENT:
+            if cpt.value == `#` && l.idx + 1 < l.max && strgs.byteAt(l.content, l.idx + 1) == `#`:
+                l.mode = LxMode.DEFAULT
+                consumeSize(l, 2)
+                l.pos.column = l.pos.column + 1
+                continue
+            ..
+            if cpt.value == `\n`:
+                try l.tokens.pushRight(tkt.Token(kwType=tkt.KwType.NEWLINE, type=tkt.TkType.KEYWORD, pos=l.pos, repr="\n"))
+                l.pos.line = l.pos.line + 1
+                l.pos.column = 0
+                consumeSize(l, cast.u8to64(cpt.width))
+                continue
+            ..
+            consumeSize(l, cast.u8to64(cpt.width))
+            continue
+        ..
+
         # reset comment mode after newline
         if cpt.value == `\n` && l.mode == LxMode.COMMENT:
 				try toggleCommentModeOff(l, cpt)
@@ -534,8 +554,14 @@ pub run(f fctx.FileCtx*) !$ls.List[tkt.Token]:
         # TODO: have a "can be commented" function instead of this bullshit
         if isModeNonStr && cpt.value == `#`:
 			try l.pushTokenBuff()
-			l.toggleMode(LxMode.COMMENT)
-			consumeSize(l, cast.u8to64(cpt.width))
+			if l.idx + 1 < l.max && strgs.byteAt(l.content, l.idx + 1) == `#`:
+				l.mode = LxMode.MULTILINE_COMMENT
+				consumeSize(l, 2)
+				l.pos.column = l.pos.column + 1
+			else:
+				l.toggleMode(LxMode.COMMENT)
+				consumeSize(l, cast.u8to64(cpt.width))
+			..
 			continue
 		..
 

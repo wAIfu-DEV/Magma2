@@ -13,6 +13,19 @@ use "std:buffered" buf
 use "../helper/logger" lg
 use "node_types" nt
 use "filectx" fctx
+use "../decl_resolver" dclr
+
+pub ProtoPayloadSize(
+    prototype dclr.Decl*
+    size u64
+    alignment u64
+)
+
+pub AggregateLayout(
+    declaration dclr.Decl*
+    size u64
+    alignment u64
+)
 
 pub alias ModuleID = str
 
@@ -36,6 +49,10 @@ pub global files hm.HashMap[fctx.FileCtx*]
 pub global lockFiles lck.Locker
 pub global importedFiles sl.StableList[fctx.FileCtx]
 pub global lockImportedFiles lck.Locker
+pub global protoPayloadSizes ls.List[ProtoPayloadSize]
+pub global lockProtoPayloadSizes lck.Locker
+pub global aggregateLayouts ls.List[AggregateLayout]
+pub global lockAggregateLayouts lck.Locker
 pub global lockStdout lck.Locker
 pub global timingLex ls.List[u64]
 pub global timingParse ls.List[u64]
@@ -46,23 +63,44 @@ pub global pipelineRunner fn(str) !$future.Future[error]
 pub global moduleNames hm.HashMap[ModuleID]
 pub global lockModuleNames lck.Locker
 
+global pipelineLockStorage adsl.AdaptiveSpinLock
+global filesLockStorage adsl.AdaptiveSpinLock
+global importedFilesLockStorage adsl.AdaptiveSpinLock
+global protoPayloadSizesLockStorage adsl.AdaptiveSpinLock
+global aggregateLayoutsLockStorage adsl.AdaptiveSpinLock
+global stdoutLockStorage adsl.AdaptiveSpinLock
+global timingsLockStorage adsl.AdaptiveSpinLock
+global moduleNamesLockStorage adsl.AdaptiveSpinLock
+
 pub initGlobal() !void:
     pipelines = try hm.new[future.Future[error]](16, none)
-    lockPipelines = adsl.new().proto()
+    pipelineLockStorage = adsl.new()
+    lockPipelines = pipelineLockStorage.protoBorrow()
 
     runningPipelines = atomic.newU64(0)
 
     files = try hm.new[fctx.FileCtx*](16, none)
-    lockFiles = adsl.new().proto()
+    filesLockStorage = adsl.new()
+    lockFiles = filesLockStorage.protoBorrow()
     importedFiles = try sl.new[fctx.FileCtx](ctx.alloc, none)
-    lockImportedFiles = adsl.new().proto()
-    lockStdout = adsl.new().proto()
+    importedFilesLockStorage = adsl.new()
+    lockImportedFiles = importedFilesLockStorage.protoBorrow()
+    protoPayloadSizes = try ls.new[ProtoPayloadSize](ctx.alloc, none)
+    protoPayloadSizesLockStorage = adsl.new()
+    lockProtoPayloadSizes = protoPayloadSizesLockStorage.protoBorrow()
+    aggregateLayouts = try ls.new[AggregateLayout](ctx.alloc, none)
+    aggregateLayoutsLockStorage = adsl.new()
+    lockAggregateLayouts = aggregateLayoutsLockStorage.protoBorrow()
+    stdoutLockStorage = adsl.new()
+    lockStdout = stdoutLockStorage.protoBorrow()
     timingLex = try ls.new[u64](ctx.alloc, none)
     timingParse = try ls.new[u64](ctx.alloc, none)
-    lockTimings = adsl.new().proto()
+    timingsLockStorage = adsl.new()
+    lockTimings = timingsLockStorage.protoBorrow()
 
     moduleNames = try hm.new[ModuleID](16, none)
-    lockModuleNames = adsl.new().proto()
+    moduleNamesLockStorage = adsl.new()
+    lockModuleNames = moduleNamesLockStorage.protoBorrow()
 ..
 
 pub TempLogger(

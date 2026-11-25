@@ -10,6 +10,7 @@ use "std:strings" strings
 use "std:sha1" sha1
 use "std:slices" slices
 use "std:list" ls
+use "std:sort" sort
 use "std:fs" fs
 use "std:hash_map" hm
 use "std:read_write_lock" rwlock
@@ -597,6 +598,95 @@ pub dependenciesFingerprint(file fctx.FileCtx*, cache FingerprintCache*) !$str:
     ret try digestString(serialized)
 ..
 
+compareVisibleFiles(a fctx.FileCtx*, b fctx.FileCtx*) i64:
+    aLength := a.path.countBytes()
+    bLength := b.path.countBytes()
+    commonLength := aLength
+    if bLength < commonLength:
+        commonLength = bLength
+    ..
+    for i := 0 to commonLength:
+        aByte := strings.byteAt(a.path, i)
+        bByte := strings.byteAt(b.path, i)
+        if aByte < bByte:
+            ret -1
+        ..
+        if aByte > bByte:
+            ret 1
+        ..
+    ..
+    if aLength < bLength:
+        ret -1
+    ..
+    if aLength > bLength:
+        ret 1
+    ..
+    ret 0
+..
+
+pub visibleImplementationsFingerprint() !$str:
+    visibleFiles := try ls.new[fctx.FileCtx*](ctx.alloc, none)
+    defer visibleFiles.free()
+    for i := 0 to gl.importedFiles.count():
+        try visibleFiles.pushRight(try gl.importedFiles.get(i))
+    ..
+    sort.quick[fctx.FileCtx*](visibleFiles.view(), compareVisibleFiles)
+    output := try builder.new()
+    defer output.free()
+    try field(addrof output, "visible-proto-implementations")
+    try number(addrof output, visibleFiles.count())
+    for i := 0 to visibleFiles.count():
+        visibleFile := try visibleFiles.get(i)
+        try field(addrof output, visibleFile.path)
+        sourceDigest := try digestString(visibleFile.content)
+        defer sourceDigest.free()
+        try field(addrof output, sourceDigest)
+    ..
+    serialized := try output.build()
+    defer serialized.free()
+    ret try digestString(serialized)
+..
+
+compareFingerprintStrings(a str, b str) i64:
+    aLength := a.countBytes()
+    bLength := b.countBytes()
+    commonLength := aLength
+    if bLength < commonLength:
+        commonLength = bLength
+    ..
+    for i := 0 to commonLength:
+        aByte := strings.byteAt(a, i)
+        bByte := strings.byteAt(b, i)
+        if aByte < bByte:
+            ret -1
+        ..
+        if aByte > bByte:
+            ret 1
+        ..
+    ..
+    if aLength < bLength:
+        ret -1
+    ..
+    if aLength > bLength:
+        ret 1
+    ..
+    ret 0
+..
+
+specializationFingerprint(specialization nt.Specialization*) !$str:
+    output := try builder.new()
+    defer output.free()
+    try field(addrof output, "specialization")
+    try declIdentity(addrof output, specialization.template)
+    try boolean(addrof output, specialization.isFunction)
+    try number(addrof output, specialization.typeArgs.count())
+    for i := 0 to specialization.typeArgs.count():
+        try appendType(addrof output, specialization.typeArgs.get(i), 0)
+    ..
+    try appendType(addrof output, specialization.concreteType, 0)
+    ret try output.build()
+..
+
 appendLocalBodies(out builder.Builder*, statement nt.GlobalStmt*) !void:
     match statement as value:
     case nt.GlobalStmt.Function:
@@ -612,26 +702,31 @@ appendLocalBodies(out builder.Builder*, statement nt.GlobalStmt*) !void:
     ..
 ..
 
-pub loweringInputsFingerprint(file fctx.FileCtx*, cache FingerprintCache*) !$str:
+pub loweringInputsFingerprint(file fctx.FileCtx*, cache FingerprintCache*, visibleFingerprint str) !$str:
     output := try builder.new()
     defer output.free()
     dependencies := try dependenciesFingerprint(file, cache)
     defer dependencies.free()
     try field(addrof output, dependencies)
+    # Protocol payload sizes can depend on implementations outside this
+    # module's dependency closure. The shared, path-sorted source fingerprint
+    # is computed once per compilation and included here.
+    try field(addrof output, visibleFingerprint)
     for i := 0 to file.astRoot.statements.count():
         try appendLocalBodies(addrof output, file.astRoot.statements.get(i))
     ..
-    try number(addrof output, file.specializations.count())
+    specializationKeys := try ls.new[str](ctx.alloc, none)
+    defer specializationKeys.free()
     for i := 0 to file.specializations.count():
         specialization := try file.specializations.get(i)
-        try field(addrof output, "specialization")
-        try declIdentity(addrof output, specialization.template)
-        try boolean(addrof output, specialization.isFunction)
-        try number(addrof output, specialization.typeArgs.count())
-        for j := 0 to specialization.typeArgs.count():
-            try appendType(addrof output, specialization.typeArgs.get(j), 0)
-        ..
-        try appendType(addrof output, specialization.concreteType, 0)
+        try specializationKeys.pushRight(try specializationFingerprint(specialization))
+    ..
+    sort.quick[str](specializationKeys.view(), compareFingerprintStrings)
+    try number(addrof output, specializationKeys.count())
+    for i := 0 to specializationKeys.count():
+        key := try specializationKeys.get(i)
+        try field(addrof output, key)
+        key.free()
     ..
     serialized := try output.build()
     defer serialized.free()

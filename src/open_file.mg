@@ -31,7 +31,6 @@ pub openFile(path str) !$fctx.FileCtx:
     defer firstLn.free()
 
     try f.seek(0, 0)
-
     modName := try parseFirstLn(firstLn)
 
     fc fctx.FileCtx, contextError error = fctx.new()
