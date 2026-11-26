@@ -1698,6 +1698,24 @@ emitExpr(state LoweringState*, expression nt.Expr*) !$str:
         try state.output.appendBorrowed("\n")
         ret try strings.concat("%v", id)
     case nt.Expr.Subscript:
+        if value.genericReference:
+            ownerNode := nt.loadExpressionNode(value.owner)
+            target dclr.Decl* = none
+            match addrof ownerNode as ownerValue:
+            case nt.Expr.Named:
+                target = ownerValue.decl
+            else:
+                throw "generic function reference must name its target"
+            ..
+            if target == none:
+                throw "generic function reference has no linked target"
+            ..
+            typeArgs := nt.emptyTypeArray()
+            try typeArgs.pushRight(ctx.alloc, try loweredConcreteType(state, value.genericTypeArg))
+            specialization := try specializationSymbol(target, typeArgs)
+            defer specialization.free()
+            ret try strings.concat("@", specialization)
+        ..
         pointer := try emitLValuePointer(state, expression)
         defer pointer.free()
         subscriptResultType := try loweredTypeName(state, value.type)
@@ -4066,8 +4084,6 @@ emitStructConstructor(state LoweringState*, resultType nt.Type*, declaration dcl
             match fieldDeclaration.kind as fieldKind:
             case dclr.DeclKind.Field:
                 expectedFieldTypeNode := try constructorFieldType(concreteResultType, fieldIndexValue, fieldKind.type)
-                sourceFieldType := try loweredTypeName(state, valueTypeNode)
-                defer sourceFieldType.free()
                 expectedFieldType := try loweredTypeName(state, expectedFieldTypeNode)
                 defer expectedFieldType.free()
                 # Named integer types (u16/u64 and aliases) still need LLVM
@@ -4866,6 +4882,9 @@ integerWidthName(name str) u64:
 ..
 
 coerceIntegerValue(state LoweringState*, value str, source nt.Type*, target nt.Type*) !$str:
+    if not checker.isIntegerType(source) || not checker.isIntegerType(target):
+        ret try strings.copy(value)
+    ..
     sourceName := try loweredTypeName(state, source)
     defer sourceName.free()
     targetName := try loweredTypeName(state, target)
@@ -7212,6 +7231,17 @@ appendWindowsArgumentsHelper(out builder.Builder*) !void:
     try out.appendBorrowed("define internal void @magma.freeUtf8Args(i32 %argc, ptr %buf) {\nentry:\n  %heap = call ptr @GetProcessHeap()\n  %argc64 = sext i32 %argc to i64\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %next, %body ]\n  %done = icmp eq i64 %i, %argc64\n  br i1 %done, label %finish, label %body\nbody:\n  %elem = getelementptr %type.str, ptr %buf, i64 %i\n  %arg = load %type.str, ptr %elem\n  %bytes = extractvalue %type.str %arg, 0\n  call i32 @HeapFree(ptr %heap, i32 0, ptr %bytes)\n  %next = add i64 %i, 1\n  br label %loop\nfinish:\n  ret void\n}\n")
 ..
 
+appendUncaughtReporterCall(out builder.Builder*, file fctx.FileCtx*, errorValue str) !void:
+    reporter := try dependencyFunction(file, "error_report", "printUncaught")
+    symbol := try declarationLinkName(reporter)
+    defer symbol.free()
+    try out.appendBorrowed("  call void @")
+    try out.appendCopy(symbol)
+    try out.appendBorrowed("(")
+    try out.appendCopy(errorValue)
+    try out.appendBorrowed(")\n")
+..
+
 appendMainEntryPoint(out builder.Builder*, file fctx.FileCtx*, entry dclr.Decl*) !void:
     entryArgs dclr.DeclArray = dclr.emptyDeclArray()
     entryReturn nt.Type* = none
@@ -7248,7 +7278,6 @@ appendMainEntryPoint(out builder.Builder*, file fctx.FileCtx*, entry dclr.Decl*)
         ..
     ..
     initializer := try dependencyFunction(file, "context_default", "newDefault")
-    reporter := try dependencyFunction(file, "errors", "printUncaught")
     initializerReturn nt.Type* = none
     match initializer.kind as initializerKind:
     case dclr.DeclKind.Function:
@@ -7262,8 +7291,6 @@ appendMainEntryPoint(out builder.Builder*, file fctx.FileCtx*, entry dclr.Decl*)
     defer contextType.free()
     initializerSymbol := try declarationLinkName(initializer)
     defer initializerSymbol.free()
-    reporterSymbol := try declarationLinkName(reporter)
-    defer reporterSymbol.free()
     entrySymbol := try declarationLinkName(entry)
     defer entrySymbol.free()
     entryNoContext := try declarationNoContext(entry)
@@ -7278,11 +7305,15 @@ appendMainEntryPoint(out builder.Builder*, file fctx.FileCtx*, entry dclr.Decl*)
     try out.appendCopy(initializerResult)
     try out.appendBorrowed(" @")
     try out.appendCopy(initializerSymbol)
-    try out.appendBorrowed("()\n  %ctx.error = extractvalue ")
-    try out.appendCopy(initializerResult)
-    try out.appendBorrowed(" %ctx.init, 0\n  %ctx.code = extractvalue %type.error %ctx.error, 1\n  %ctx.failed = icmp ne i32 %ctx.code, 0\n  br i1 %ctx.failed, label %ctx.failed.block, label %ctx.ready\nctx.failed.block:\n  call void @")
-    try out.appendCopy(reporterSymbol)
-    try out.appendBorrowed("(%type.error %ctx.error)\n  ret i32 %ctx.code\nctx.ready:\n  %ctx.value = extractvalue ")
+    try out.appendBorrowed("()\n")
+    if not gl.naked:
+        try out.appendBorrowed("  %ctx.error = extractvalue ")
+        try out.appendCopy(initializerResult)
+        try out.appendBorrowed(" %ctx.init, 0\n  %ctx.code = extractvalue %type.error %ctx.error, 1\n  %ctx.failed = icmp ne i32 %ctx.code, 0\n  br i1 %ctx.failed, label %ctx.failed.block, label %ctx.ready\nctx.failed.block:\n")
+        try appendUncaughtReporterCall(out, file, "%type.error %ctx.error")
+        try out.appendBorrowed("  ret i32 %ctx.code\nctx.ready:\n")
+    ..
+    try out.appendBorrowed("  %ctx.value = extractvalue ")
     try out.appendCopy(initializerResult)
     try out.appendBorrowed(" %ctx.init, 1\n  store ")
     try out.appendCopy(contextType)
@@ -7324,9 +7355,10 @@ appendMainEntryPoint(out builder.Builder*, file fctx.FileCtx*, entry dclr.Decl*)
     if entryThrows:
         try out.appendBorrowed("  %main.error = extractvalue ")
         try out.appendCopy(entryResult)
-        try out.appendBorrowed(" %main.result, 0\n  %main.code = extractvalue %type.error %main.error, 1\n  %main.failed = icmp ne i32 %main.code, 0\n  br i1 %main.failed, label %main.failed.block, label %main.success\nmain.failed.block:\n  call void @")
-        try out.appendCopy(reporterSymbol)
-        try out.appendBorrowed("(%type.error %main.error)\n")
+        try out.appendBorrowed(" %main.result, 0\n  %main.code = extractvalue %type.error %main.error, 1\n  %main.failed = icmp ne i32 %main.code, 0\n  br i1 %main.failed, label %main.failed.block, label %main.success\nmain.failed.block:\n")
+        if not gl.naked:
+            try appendUncaughtReporterCall(out, file, "%type.error %main.error")
+        ..
         if windowsTarget && entryArgs.count() == 1:
             try out.appendBorrowed("  call void @magma.freeUtf8Args(i32 %argc, ptr %magma.args.buffer)\n")
         ..

@@ -1,5 +1,7 @@
 mod main
 use "std:errors" as errors
+use "std:error_report" as error_report
+use "std:path" as path
 use "std:strings" as strings
 
 tracedFailure() !u8:
@@ -8,7 +10,7 @@ tracedFailure() !u8:
 
 pub main() !void:
     success := errors.ok()
-    errors.printTrace(success)
+    error_report.printTrace(success)
     if success.nok() || success.ok() == false || success.nok():
         throw errors.failure("ok error classification changed")
     ..
@@ -35,7 +37,9 @@ pub main() !void:
     if trace.isEmpty():
         throw errors.failure("throw did not record an error trace")
     ..
-    if strings.compare(trace.function(), "tracedFailure") == false || strings.compare(trace.file(), "errors.mg") == false || trace.line() != 6 || trace.column() == 0 || trace.isTruncated():
+    traceFile := try path.base(trace.file())
+    defer traceFile.free()
+    if strings.compare(trace.function(), "tracedFailure") == false || strings.compare(traceFile, "errors.mg") == false || trace.line() != 7 || trace.column() == 0 || trace.isTruncated():
         throw errors.failure("error trace metadata changed")
     ..
     parent := trace.next()

@@ -3,8 +3,6 @@ mod errors
 
 use "std:cast" as cast
 
-ext ext_error_printf printf(format u8*, a u64, b u64, c u64, d u64, e u64, f u64) i32
-
 pub const ERR_OK u32 = 0
 pub const ERR_FAIL u32 = 1
 pub const ERR_INVALID_ARG u32 = 2
@@ -20,6 +18,13 @@ pub const ERR_TIMED_OUT u32 = 11
 pub const ERR_CONNECTION_RESET u32 = 12
 pub const ERR_CONNECTION_REFUSED u32 = 13
 pub const ERR_ADDRESS_IN_USE u32 = 14
+
+# Compatibility no-op for bootstrap compilers that still resolve their
+# generated entry-point reporter from std:errors. New builds use
+# std:error_report.printUncaught instead.
+pub noctx printUncaught(e error) void:
+    e = e
+..
 
 # A cursor over an error's bounded propagation trace. The newest propagation
 # site is returned first. Traversal is bounded because ring reuse may replace
@@ -111,34 +116,6 @@ noctx traceColumn(handle u64) u32:
 # @warning The cursor must not be empty.
 pub noctx Trace.column() u32:
     ret traceColumn(this.handle)
-..
-
-# Prints all recorded propagation sites without allocating.
-# @complexity O(N), where N is the retained trace length
-# @example
-#   errors.printTrace(failure)
-pub noctx printTrace(e error) void:
-    cursor := trace(e)
-    loop cursor.isEmpty() == false:
-        function := cursor.function()
-        file := cursor.file()
-        format := "  at %.*s (%.*s:%u:%u)\n"
-        ext_error_printf(format.__data, function.__byteCount, cast.ptou(function.__data), file.__byteCount, cast.ptou(file.__data), cast.u32to64(cursor.line()), cast.u32to64(cursor.column()))
-        cursor = cursor.next()
-    ..
-    if cursor.isTruncated():
-        warning := "  ... trace truncated: diagnostic storage was reused or traversal reached its bound\n"
-        ext_error_printf(warning.__data, 0, 0, 0, 0, 0, 0)
-    ..
-..
-
-# Prints an uncaught error and its propagation trace without requiring an
-# initialized Magma context.
-pub noctx printUncaught(e error) void:
-    name := toStr(e)
-    format := "Uncaught Error: %.*s (%.*s)\n"
-    ext_error_printf(format.__data, name.__byteCount, cast.ptou(name.__data), cast.u16to64(e.__messageLength), cast.ptou(e.__message), 0, 0)
-    printTrace(e)
 ..
 
 # Reports whether two errors belong to the same numeric category.

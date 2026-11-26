@@ -17,9 +17,22 @@ use "std:llvm" as ll
 
 @platform("windows")
 use "std:win/generation_wait" as generation_wait
+@platform("windows")
+use "std:win/address_wait" as address_wait
 
 @platform("linux", "android", "ios", "darwin", "freebsd", "netbsd", "openbsd")
 use "std:unix/generation_wait" as generation_wait
+@platform("linux", "android", "ios", "darwin", "freebsd", "netbsd", "openbsd")
+use "std:unix/address_wait" as address_wait
+
+Completion(
+    allocator alc.Allocator
+    entry fn(ptr) u64
+    context ptr
+    result u64
+    status u32
+    waiter address_wait.Wait
+)
 
 Task(
     entry fn(ptr) u64
@@ -70,8 +83,43 @@ pub ThreadPool impl executor.Executor(
     state State*
 )
 
-ThreadPool.submitRaw(entry ptr, context ptr) !void:
-    try this.submit(entry, context)
+ThreadPool.submitRaw(entry ptr, context ptr) !executor.Awaitable[u64, executor.RawTask]:
+    a := ctx.alloc
+    completion Completion* = try a.allocT[Completion](1)
+    onerror a.free(completion)
+    completion.allocator = a
+    completion.entry = entry
+    completion.context = context
+    completion.result = 0
+    completion.status = 0
+    completion.waiter = try address_wait.new()
+    onerror address_wait.free(addrof completion.waiter)
+    rawTask executor.RawTask* = try a.allocT[executor.RawTask](1)
+    onerror a.free(rawTask)
+    rawTask.handle = cast.reinterpret[ptr](completion)
+    try this.submit(runCompletion, completion)
+    ret executor.Awaitable[u64, executor.RawTask](value=0, context=rawTask, awaitRaw=awaitCompletion)
+..
+
+runCompletion(raw ptr) u64:
+    completion Completion* = cast.reinterpret[Completion](raw)
+    completion.result = completion.entry(completion.context)
+    ll.atomicStoreReleaseU32(addrof completion.status, 1)
+    address_wait.wake(addrof completion.waiter, addrof completion.status)
+    ret 0
+..
+
+awaitCompletion(raw executor.RawTask*) !u64:
+    completion Completion* = cast.reinterpret[Completion](raw.handle)
+    loop ll.atomicLoadAcquireU32(addrof completion.status) == 0:
+        try address_wait.wait(addrof completion.waiter, addrof completion.status)
+    ..
+    result u64 = completion.result
+    a := completion.allocator
+    address_wait.free(addrof completion.waiter)
+    a.free(completion)
+    a.free(raw)
+    ret result
 ..
 
 ThreadPool.releaseRaw() void:
@@ -82,6 +130,12 @@ ThreadPool.releaseRaw() void:
 # @complexity O(1)
 ThreadPool.executor() executor.Executor:
     ret this.protoBorrow()
+..
+
+ThreadPool.closeIfActive() !void:
+    if this.state != none:
+        try this.close()
+    ..
 ..
 
 releaseIdle(value $wake.Wake) void:

@@ -632,7 +632,7 @@ parseExpression(p Parser*, minPrec u8) !nt.Expr*:
             close := try p.peek()
             try ensureKwType(p, close, tkt.KwType.BRACK_CL, "expected closing bracket after subscript", "expected: ]")
             p.consume()
-            left = try makeExpr(p, nt.Expr.Subscript(type=none, owner=left, index=index, category=nt.ValueCategory.Unresolved))
+            left = try makeExpr(p, nt.Expr.Subscript(type=none, owner=left, index=index, category=nt.ValueCategory.Unresolved, genericReference=false, genericTypeArg=none))
             continue
         ..
         prec := binaryPrecedence(op)
@@ -2786,7 +2786,12 @@ pub run(f fctx.FileCtx*) !void:
     ..
     isMainPackage := strgs.compare(f.path, gl.mainUniqueName)
     if isMainPackage && (try hasMainEntryPoint(f)):
-        try addImplicitImport(p, "std:context_default")
+        if gl.naked:
+            try addImplicitImport(p, "std:context_naked")
+        else:
+            try addImplicitImport(p, "std:context_default")
+            try addImplicitImport(p, "std:error_report")
+        ..
         try addImplicitImport(p, "std:errors")
     ..
 ..

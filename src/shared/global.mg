@@ -40,6 +40,7 @@ pub global stdLibRoot str = UNSET
 pub global mainUniqueName str = UNSET
 
 pub global errTraceSlots u64 = 1024
+pub global naked bool
 
 pub global pipelines hm.HashMap[future.Future[error]]
 pub global lockPipelines lck.Locker

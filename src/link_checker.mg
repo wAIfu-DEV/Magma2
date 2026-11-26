@@ -227,7 +227,7 @@ cloneExpression(c Checker*, source nt.Expr*) !nt.Expr*:
     case nt.Expr.MemberAccess:
         ret try makeNodeExpression(c, nt.Expr.MemberAccess(type=try cloneType(c, value.type), owner=try cloneExpression(c, value.owner), member=try cloneExpression(c, value.member), category=value.category, isProtoMethod=value.isProtoMethod))
     case nt.Expr.Subscript:
-        ret try makeNodeExpression(c, nt.Expr.Subscript(type=try cloneType(c, value.type), owner=try cloneExpression(c, value.owner), index=try cloneExpression(c, value.index), category=value.category))
+        ret try makeNodeExpression(c, nt.Expr.Subscript(type=try cloneType(c, value.type), owner=try cloneExpression(c, value.owner), index=try cloneExpression(c, value.index), category=value.category, genericReference=value.genericReference, genericTypeArg=try cloneType(c, value.genericTypeArg)))
     case nt.Expr.Array:
         indices := nt.emptyIndexArray()
         for i := 0 to value.resolvedIndices.count():
@@ -954,28 +954,6 @@ expressionAsType(c Checker*, expression nt.Expr*, scope dclr.Scope*) !nt.Type*:
     ..
 ..
 
-genericReferenceFromSubscript(c Checker*, declaration dclr.Decl*, index nt.Expr*, scope dclr.Scope*) !nt.Type*:
-    if declaration == none:
-        throw "declaration does not support generic application"
-    ..
-    match declaration.kind as declarationKind:
-    case dclr.DeclKind.Function:
-        if declarationKind.typeParams.count() == 0:
-            throw "declaration does not support generic application"
-        ..
-    case dclr.DeclKind.Struct:
-        if declarationKind.typeParams.count() == 0:
-            throw "declaration does not support generic application"
-        ..
-    else:
-        throw "declaration does not support generic application"
-    ..
-    parameters := try genericParams(declaration)
-    arguments := nt.emptyTypeArray()
-    try arguments.pushRight(ctx.alloc, try expressionAsType(c, index, scope))
-    ret try instantiateGenericReference(c, declaration, arguments, scope, none)
-..
-
 checkType(c Checker*, type nt.Type*, scope dclr.Scope*, allowThrow bool) !void:
     if type == none:
         throw "missing type"
@@ -1489,7 +1467,7 @@ numericInfo(type nt.Type*, depth u64) NumericInfo:
     ..
 ..
 
-isIntegerType(type nt.Type*) bool:
+pub isIntegerType(type nt.Type*) bool:
     ret numericInfo(type, 0).integer
 ..
 
@@ -2456,6 +2434,8 @@ checkExpression(c Checker*, expression nt.Expr*, scope dclr.Scope*) !nt.Type*:
         ..
         ret value.type
     case nt.Expr.Subscript:
+        value.genericReference = false
+        value.genericTypeArg = none
         ownerType := try checkExpression(c, value.owner, scope)
         genericDeclaration := callableDeclaration(value.owner)
         if genericDeclaration != none:
@@ -2469,7 +2449,14 @@ checkExpression(c Checker*, expression nt.Expr*, scope dclr.Scope*) !nt.Type*:
                 hasGenericParams = false
             ..
             if hasGenericParams && (try expressionLooksLikeType(c, value.index, scope)):
-                ret try genericReferenceFromSubscript(c, genericDeclaration, value.index, scope)
+                genericArgument := try expressionAsType(c, value.index, scope)
+                value.genericReference = true
+                value.genericTypeArg = genericArgument
+                genericArguments := nt.emptyTypeArray()
+                try genericArguments.pushRight(ctx.alloc, genericArgument)
+                value.type = try instantiateGenericReference(c, genericDeclaration, genericArguments, scope, none)
+                value.category = nt.ValueCategory.Value
+                ret value.type
             ..
         ..
         indexType := try checkExpression(c, value.index, scope)

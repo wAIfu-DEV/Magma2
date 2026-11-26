@@ -289,7 +289,7 @@ pub union Expr impl Node(
     Literal(type Type*, literal Literal*)
     Named(type Type*, name str, decl declr.Decl*, category ValueCategory, sourcePos origin.FilePos)
     MemberAccess(type Type*, owner Expr*, member Expr*, category ValueCategory, isProtoMethod bool)
-    Subscript(type Type*, owner Expr*, index Expr*, category ValueCategory)
+    Subscript(type Type*, owner Expr*, index Expr*, category ValueCategory, genericReference bool, genericTypeArg Type*)
     Array(type Type*, length Expr*, inferLength bool, resolvedLength u64, hasResolvedLength bool, resolvedIndices NodeArray[u64])
     Embed(path str)
     CompilerKnown(name str, resolvedValue str)

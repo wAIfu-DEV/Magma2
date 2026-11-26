@@ -9,19 +9,12 @@ use "std:executor" as executor
 use "std:time" as time
 use "std:abort" as abort
 
-@platform("windows")
-use "std:win/address_wait" as address_wait
-
-@platform("linux", "android", "ios", "darwin", "freebsd", "netbsd", "openbsd")
-use "std:unix/address_wait" as address_wait
-
 State[T](
     allocator alc.Allocator
     value T
     failure error
     status u32
     references u32
-    waiter address_wait.Wait
     controller abort.Controller
 )
 
@@ -37,6 +30,7 @@ Work[T, Context](
 # @mustcall await
 pub Future[T](
     state State[T]*
+    task executor.Awaitable[u64, executor.RawTask]
 )
 
 atomicAdd(target u64*, value u64) void:
@@ -65,7 +59,6 @@ releaseReference(references u32*) u32:
 
 releaseState[T](state State[T]*) void:
     if releaseReference(addrof state.references) == 1:
-        address_wait.free(addrof state.waiter)
         # SAFETY: the last reference uniquely owns the embedded controller.
         unsafe:
             state.controller.close()
@@ -95,7 +88,6 @@ taskMain[T, Context](work Work[T, Context]*) u64:
         ..
     ..
     publishDone(addrof state.status)
-    address_wait.wake(addrof state.waiter, addrof state.status)
     releaseState[T](state)
     ret 0
 ..
@@ -105,9 +97,8 @@ checkBeforeStart(signal abort.Signal) !bool:
     ret true
 ..
 
-submitWork[T, Context](scheduler executor.Executor, work Work[T, Context]*) !bool:
-    try scheduler.submit[Work[T, Context]](taskMain[T, Context], work)
-    ret true
+submitWork[T, Context](scheduler executor.Executor, work Work[T, Context]*) !executor.Awaitable[u64, executor.RawTask]:
+    ret try scheduler.submit[Work[T, Context]](taskMain[T, Context], work)
 ..
 
 # Future backend using atomic publication and a platform completion wait.
@@ -138,12 +129,8 @@ pub new[T, Context](scheduler executor.Executor, entry fn(Context*) !T, context 
     work.context = context
     work.abortable = false
 
-    waiter address_wait.Wait = try address_wait.new()
-    state.waiter = waiter
-    onerror address_wait.free(addrof state.waiter)
-
-    try submitWork[T, Context](scheduler, work)
-    ret Future[T](state=state)
+    task := try submitWork[T, Context](scheduler, work)
+    ret Future[T](state=state, task=task)
 ..
 
 # Creates a future whose work receives the future's abort signal.
@@ -162,11 +149,8 @@ pub newAbort[T, Context](scheduler executor.Executor, entry fn(Context*, abort.S
     work.abortEntry = entry
     work.context = context
     work.abortable = true
-    waiter address_wait.Wait = try address_wait.new()
-    state.waiter = waiter
-    onerror address_wait.free(addrof state.waiter)
-    try submitWork[T, Context](scheduler, work)
-    ret Future[T](state=state)
+    task := try submitWork[T, Context](scheduler, work)
+    ret Future[T](state=state, task=task)
 ..
 
 closeController[T](state State[T]*) void:
@@ -221,18 +205,15 @@ destr Future[T].await() !$T:
         throw errors.invalidArgument("future is not active")
     ..
     state State[T]* = this.state
-    loop loadStatus(addrof state.status) == 0:
-        try address_wait.wait(addrof state.waiter, addrof state.status)
-    ..
-
+    this.state = none
+    task executor.Awaitable[u64, executor.RawTask] = move this.task
+    ignored u64 = try task.await()
     if state.failure.nok():
         failure error = state.failure
-        this.state = none
         releaseState[T](state)
         throw failure
     ..
     value $T = state.value
-    this.state = none
     releaseState[T](state)
     ret move value
 ..

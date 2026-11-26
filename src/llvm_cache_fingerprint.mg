@@ -226,6 +226,10 @@ appendExpr(out builder.Builder*, expression nt.Expr*, depth u64) !void:
         try appendExpr(out, value.member, depth + 1)
     case nt.Expr.Subscript:
         try field(out, "subscript")
+        try boolean(out, value.genericReference)
+        if value.genericReference:
+            try appendType(out, value.genericTypeArg, depth + 1)
+        ..
         try appendExpr(out, value.owner, depth + 1)
         try appendExpr(out, value.index, depth + 1)
     case nt.Expr.Array:

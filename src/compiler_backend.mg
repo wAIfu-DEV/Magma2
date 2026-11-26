@@ -4,6 +4,7 @@ use "std:time" time
 use "std:errors" errors
 use "std:strings" strings
 use "std:stable_list" stable
+use "std:executor" as executor
 use "std:future" fut
 use "helper/logger" log
 use "shared/global" gl
@@ -138,7 +139,7 @@ pub resolveCacheLookups(
     if PARALLEL_CACHE_LOOKUP:
         interfaceFutures := try stable.new[fut.Future[error]](ctx.alloc, cleanupAssemblyFuture)
         defer interfaceFutures.free()
-        for i := 0 to checkedFiles.count(): try interfaceFutures.push(fut.Future[error](state=none)) ..
+        for i := 0 to checkedFiles.count(): try interfaceFutures.push(fut.Future[error](state=none, task=executor.Awaitable[u64, executor.RawTask](value=0, context=none, awaitRaw=none))) ..
         for i := 0 to checkedFiles.count():
             moduleFile := try checkedFiles.get(i)
             resultSlot := try interfaceFingerprints.get(i)
@@ -156,7 +157,7 @@ pub resolveCacheLookups(
         ..
         loweringFutures := try stable.new[fut.Future[error]](ctx.alloc, cleanupAssemblyFuture)
         defer loweringFutures.free()
-        for i := 0 to checkedFiles.count(): try loweringFutures.push(fut.Future[error](state=none)) ..
+        for i := 0 to checkedFiles.count(): try loweringFutures.push(fut.Future[error](state=none, task=executor.Awaitable[u64, executor.RawTask](value=0, context=none, awaitRaw=none))) ..
         for i := 0 to checkedFiles.count():
             moduleFile := try checkedFiles.get(i)
             resultSlot := try loweringFingerprints.get(i)
@@ -172,7 +173,7 @@ pub resolveCacheLookups(
             fingerprint := try loweringFingerprints.get(i)
             try markLoweringRole(moduleFile, mainFilePath, fingerprint, traceErrors)
         ..
-        for i := 0 to checkedFiles.count(): try lookupFutures.push(fut.Future[error](state=none)) ..
+        for i := 0 to checkedFiles.count(): try lookupFutures.push(fut.Future[error](state=none, task=executor.Awaitable[u64, executor.RawTask](value=0, context=none, awaitRaw=none))) ..
         for i := 0 to checkedFiles.count():
             moduleFile := try checkedFiles.get(i)
             resultSlot := try lookupResults.get(i)
@@ -234,7 +235,7 @@ newLoweringFutures(count u64) !$stable.StableList[fut.Future[error]]:
     futures := try stable.new[fut.Future[error]](ctx.alloc, cleanupLoweringFuture)
     onerror futures.free()
     for i := 0 to count:
-        try futures.push(fut.Future[error](state=none))
+        try futures.push(fut.Future[error](state=none, task=executor.Awaitable[u64, executor.RawTask](value=0, context=none, awaitRaw=none)))
     ..
     ret move futures
 ..
@@ -243,7 +244,7 @@ newAssemblyFutures(count u64) !$stable.StableList[fut.Future[error]]:
     futures := try stable.new[fut.Future[error]](ctx.alloc, cleanupAssemblyFuture)
     onerror futures.free()
     for i := 0 to count:
-        try futures.push(fut.Future[error](state=none))
+        try futures.push(fut.Future[error](state=none, task=executor.Awaitable[u64, executor.RawTask](value=0, context=none, awaitRaw=none)))
     ..
     ret move futures
 ..

@@ -4,29 +4,26 @@ use "std:allocator" as allocator
 use "std:errors" as errors
 use "std:executor" as executor
 use "std:heap" as heap
-use "std:thread_pool" as thread_pool
 
 increment(value u64*) u64:
     *value = *value + 1
     ret 0
 ..
 
-submitIncrement(scheduler executor.Executor*, value u64*) !void:
-    try scheduler.submit[u64](increment, value)
-..
-
 pub main() !void:
     a allocator.Allocator = heap.allocator()
-    pool := try thread_pool.new(a, 1, 1, 4, 1)
-    scheduler := pool.executor()
+    scheduler := executor.singleThread()
     value u64 = 0
 
-    try submitIncrement(addrof scheduler, addrof value)
-    try pool.wait()
+    pending := try scheduler.submit[u64](increment, addrof value)
     if value != 1:
-        try pool.close()
-        throw errors.failure("executor did not submit work to its thread pool")
+        throw errors.failure("single-thread executor did not run work on submit")
     ..
-
-    try pool.close()
+    result u64 = try pending.await()
+    if result != 0:
+        throw errors.failure("single-thread executor returned the wrong task result")
+    ..
+    if value != 1:
+        throw errors.failure("awaiting the completed task changed its result")
+    ..
 ..
