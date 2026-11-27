@@ -1,7 +1,14 @@
 mod compiler_known
 
+# Resolves compiler known types (for now exclusive to the std:c lib)
+# @author codex (GPT6 Luna)
+
+
 use "std:strings" strgs
 use "shared/global" gl
+
+# TODO: (devan) resolve C types based on layout
+# TODO: (devan) use a fucking hash map
 
 # Resolves compiler-owned type names to the primitive types for the current
 # host ABI. Keep this mapping outside the checker so every type position that

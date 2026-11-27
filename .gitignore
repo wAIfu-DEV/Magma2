@@ -1,4 +1,5 @@
 magma
 out
+out.ll
 build
 .magma/

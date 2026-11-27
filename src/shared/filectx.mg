@@ -75,15 +75,9 @@ pub FileCtx(
     lineIdx ls.List[u64]
     tokens ls.List[tkt.Token]
 
-    # GET THIS SHIT OUT OF HERE
     astNodes stable.StableList[nt.Node]
     astRoot nt.Root
     specializations nt.SpecializationPointerArray
-
-    # TO IMPLEMENT
-    scopeTree bool
-    interfaceOnly bool
-    interfaceSnapshot bool
 )
 
 const UNSET str = "unset"
@@ -115,10 +109,5 @@ pub new() !$FileCtx:
         astNodes=try stable.new[nt.Node](ctx.alloc, none),
         astRoot=nt.Root(statements=nt.emptyNodeArray[nt.GlobalStmt*]()),
         specializations=nt.emptySpecializationArray(),
-
-        # TODO: to implement
-        scopeTree=false,
-        interfaceOnly=false,
-        interfaceSnapshot=false,
     )
 ..

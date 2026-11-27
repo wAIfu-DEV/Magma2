@@ -1,5 +1,9 @@
 mod global_state
 
+# Shared global state accessible through the entire compiler
+# @author devan
+# @author codex (GPT6 Luna)
+
 use "std:hash_map" hm
 use "std:future" future
 use "std:locker" lck
@@ -9,6 +13,7 @@ use "std:stable_list" sl
 use "std:writer" wr
 use "std:list" ls
 use "std:buffered" buf
+use "std:io" io
 
 use "../helper/logger" lg
 use "node_types" nt
@@ -133,7 +138,10 @@ TempLogger.write(bytes str) !TempLogger*:
     if this.x == 0:
         ret this
     ..
-    try logger.writer.write(bytes)
+    # stdout is locked, so no need to buffer the input
+    try io.stdoutConst().write(bytes)
+
+    # try logger.writer.write(bytes)
     ret this
 ..
 
@@ -141,7 +149,10 @@ TempLogger.writeLn(bytes str) !TempLogger*:
     if this.x == 0:
         ret this
     ..
-    try logger.writer.writeLn(bytes)
+    
+    try io.stdoutConst().writeLn(bytes)
+
+    #try logger.writer.writeLn(bytes)
     ret this
 ..
 
@@ -149,7 +160,11 @@ TempLogger.writeInt64(num i64) !TempLogger*:
     if this.x == 0:
         ret this
     ..
-    try logger.writer.writeInt64(num)
+
+    c := io.stdoutConst()
+    w := c.protoBorrow[wr.Writer]()
+    try w.writeInt64(num)
+
     ret this
 ..
 
@@ -157,6 +172,8 @@ TempLogger.writeUint64(num u64) !TempLogger*:
     if this.x == 0:
         ret this
     ..
-    try logger.writer.writeUint64(num)
+    c := io.stdoutConst()
+    w := c.protoBorrow[wr.Writer]()
+    try w.writeUint64(num)
     ret this
 ..

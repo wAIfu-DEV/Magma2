@@ -165,36 +165,26 @@ isZeroBytes(bytes u8* bounded n, n u64) bool:
 # @safety in must reference a writable range of at least n bytes.
 # @example
 #   memory.set(destination, byteCount, 255)
-pub set(in ptr, n u64, with u8) void:
+pub set(in ptr, n u64, withByte u8) void:
     # will lower to @llvm.memset.p0i8.i64
 
     # SAFETY: the API contract requires a writable n-byte range.
     unsafe:
         inu u8* = in
         bounded inu by n:
-            setBytes(inu, n, with)
+            setBytes(inu, n, withByte)
         ..
     ..
 ..
 
-setBytes(in u8* bounded n, n u64, with u8) void:
+setBytes(in u8* bounded n, n u64, withByte u8) void:
     for i u64 = 0 to n:
-        in[i] = with
+        in[i] = withByte
     ..
 ..
 
-# Zeros n bytes starting at in.
-# @complexity O(N) for n bytes.
-# @param in destination pointer
-# @param n number of bytes to zero
-# @safety in must reference a writable range of at least n bytes.
-# @example
-#   memory.zero(destination, byteCount)
-pub zero(in ptr, n u64) void:
-    set(in, n, 0)
-..
-
 # Returns a zero initialized value of type T 
+# @deprecated use the `zero` keyword instead
 # @complexity O(1)
 # @returns T with every field initialized to its zero value
 # @example

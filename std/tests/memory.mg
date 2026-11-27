@@ -11,7 +11,7 @@ pub main() !void:
     if memory.compare(slices.toPtr(source), slices.toPtr(target), 4) == false:
         throw errors.failure("memory copy changed")
     ..
-    memory.zero(slices.toPtr(target), 4)
+    memory.set(slices.toPtr(target), 4, 0)
     if target[0] != 0 || target[1] != 0:
         throw errors.failure("memory zero changed")
     ..

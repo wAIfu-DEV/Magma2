@@ -2,6 +2,7 @@ mod llvm_cache
 
 # Per-source bitcode cache. The front end remains authoritative: callers invoke
 # lookup only after parsing/linking/checking the current graph.
+# @author codex (GPT6 Luna)
 
 use "std:fs" fs
 use "std:path" path
@@ -542,14 +543,27 @@ pub assembleAsync(cache Cache*, file fctx.FileCtx*, interfaceFingerprint str, ll
     ret try future.newAbort[error, AssemblyWork](ctx.exec, runAssemblyWork, work)
 ..
 
-# Links the complete checked graph from independent bitcode units. Reuses the
-# linked object when the ordered bitcode inputs and link settings match.
-pub linkModulesToIR(cache Cache*, files fctx.FileArray, outputPath str) !void:
+# Links the complete checked graph, optimizes the combined module, and writes
+# textual LLVM IR at the requested optimization level.
+pub linkModulesToIR(cache Cache*, files fctx.FileArray, optimizationLevel u64, outputPath str) !void:
+    suffix := try strconv.formatUint(time.ticks())
+    defer suffix.free()
+    linkedName := try strings.concat("linked-ir-", suffix)
+    defer linkedName.free()
+    linkedPath := try join2(cache.root, linkedName)
+    defer linkedPath.free()
+    defer removeQuietly(linkedPath)
+
+    outputTempSuffix := try strings.concat(".magma-tmp-", suffix)
+    defer outputTempSuffix.free()
+    outputTemp := try strings.concat(outputPath, outputTempSuffix)
+    defer outputTemp.free()
+    defer removeQuietly(outputTemp)
+
     arguments := try ls.new[str](ctx.alloc, cleanupString)
     defer arguments.free()
-    try arguments.pushRight(try strings.copy("-S"))
     try arguments.pushRight(try strings.copy("-o"))
-    try arguments.pushRight(try strings.copy(outputPath))
+    try arguments.pushRight(try strings.copy(linkedPath))
     for i := 0 to files.count():
         file := try files.get(i)
         bitcodePath := try moduleBitcodePath(cache, file)
@@ -560,6 +574,19 @@ pub linkModulesToIR(cache Cache*, files fctx.FileArray, outputPath str) !void:
     if exitCode != 0:
         throw "llvm-link failed while producing LLVM IR"
     ..
+
+    optimization := try strconv.formatUint(optimizationLevel)
+    defer optimization.free()
+    optimizationFlag := try strings.concat("-O", optimization)
+    defer optimizationFlag.free()
+    targetTripleFlag := try strings.concat("-mtriple=", cache.targetTriple)
+    defer targetTripleFlag.free()
+    optimizationArguments := []str(optimizationFlag, targetTripleFlag, "-S", "-o", outputTemp, linkedPath)
+    optimizationCode := try proc.exec("opt", optimizationArguments)
+    if optimizationCode != 0:
+        throw "opt failed while optimizing linked LLVM IR"
+    ..
+    try fs.replace(outputTemp, outputPath)
 ..
 
 pub linkModules(cache Cache*, files fctx.FileArray, optimizationLevel u64, threadCount u64, outputPath str, produceExecutable bool) !void:

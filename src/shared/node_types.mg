@@ -1,5 +1,9 @@
 mod node_types
 
+# Different node types making up the AST
+# @author devan
+# @author codex (GPT6 Luna)
+
 use "origin" origin
 
 use "std:allocator" alc
@@ -287,7 +291,10 @@ pub enum CallKind u8(
 pub union Expr impl Node(
     Empty()
     Literal(type Type*, literal Literal*)
+    Zero(type Type*, sourcePos origin.FilePos)
     Named(type Type*, name str, decl declr.Decl*, category ValueCategory, sourcePos origin.FilePos)
+    EnumVariant(type Type*, name str, decl declr.Decl*, sourcePos origin.FilePos)
+    InferredStructConstructor(type Type*, decl declr.Decl*, args NodeArray[Expr*], sourcePos origin.FilePos)
     MemberAccess(type Type*, owner Expr*, member Expr*, category ValueCategory, isProtoMethod bool)
     Subscript(type Type*, owner Expr*, index Expr*, category ValueCategory, genericReference bool, genericTypeArg Type*)
     Array(type Type*, length Expr*, inferLength bool, resolvedLength u64, hasResolvedLength bool, resolvedIndices NodeArray[u64])

@@ -56,7 +56,7 @@ pub new(a allocator.Allocator, options Options) !$Resolver:
     ..
     entries Entry* = try a.allocT[Entry](options.capacity)
     onerror a.free(entries)
-    memory.zero(entries, options.capacity * sizeof Entry)
+    memory.set(entries, options.capacity * sizeof Entry, 0)
     guard := try mutex.new()
     ret Resolver(allocator=a, entries=entries, capacity=options.capacity, ttlMs=options.ttlMs, negativeTtlMs=options.negativeTtlMs, maxResults=options.maxResults, lock=move guard, active=true)
 ..
@@ -108,7 +108,7 @@ clearEntry(resolver Resolver*, entry Entry*) void:
         if entry.endpoints != none:
             resolver.allocator.free(entry.endpoints)
         ..
-        memory.zero(entry, sizeof Entry)
+        memory.set(entry, sizeof Entry, 0)
       ..
     ..
 ..

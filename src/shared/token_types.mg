@@ -1,5 +1,8 @@
 mod tok_types
 
+# Types of tokens the lexer will parse
+# @author devan
+
 use "std:errors" errs
 use "std:hash_map" hmp
 use "std:cast" cast
@@ -117,6 +120,9 @@ pub enum KwType u8(
     CASE
     GLOBAL
     ENUM
+    WITH
+    THEN
+    ZERO
     _END
 )
 
@@ -196,6 +202,9 @@ global KwTypeToRepr str[] = [KwType._END]str(
     KwType.CASE = "case"
     KwType.GLOBAL = "global"
     KwType.ENUM = "enum"
+    KwType.WITH = "with"
+    KwType.THEN = "then"
+    KwType.ZERO = "zero"
 )
 
 

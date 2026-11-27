@@ -2,6 +2,7 @@ mod safety_checker
 # Path-sensitive ownership checking over the linked, typed AST. The first
 # traversal records the destructor-bearing types; the second analyzes checked
 # function bodies. No semantic name resolution is repeated here.
+# @author codex (GPT6 Luna)
 
 use "std:errors" errs
 use "std:list" ls
@@ -417,6 +418,8 @@ freshOwnerExpression(expression nt.Expr*) bool:
     case nt.Expr.Try: ret freshOwnerExpression(value.call)
     case nt.Expr.DirectCall:
         ret value.callKind == nt.CallKind.StructConstructor || value.callKind == nt.CallKind.UnionConstructor
+    case nt.Expr.InferredStructConstructor:
+        ret true
     case nt.Expr.TemplatedDirectCall:
         ret value.callKind == nt.CallKind.StructConstructor || value.callKind == nt.CallKind.UnionConstructor
     case nt.Expr.IndirectCall:
@@ -443,6 +446,7 @@ isDiscardedOwner(expression nt.Expr*) bool:
     case nt.Expr.TemplatedDirectCall: ret true
     case nt.Expr.IndirectCall: ret true
     case nt.Expr.TemplatedIndirectCall: ret true
+    case nt.Expr.InferredStructConstructor: ret true
     case nt.Expr.Try: ret true
     else: ret false
     ..
@@ -469,8 +473,12 @@ isThrowingType(value nt.Type*, depth u64) bool:
 expressionType(expression nt.Expr*) nt.Type*:
     if expression == none: ret none ..
     match expression as value:
+    case nt.Expr.Zero:
+        ret value.type
     case nt.Expr.Literal: ret value.type
     case nt.Expr.Named: ret value.type
+    case nt.Expr.EnumVariant: ret value.type
+    case nt.Expr.InferredStructConstructor: ret value.type
     case nt.Expr.MemberAccess: ret value.type
     case nt.Expr.Subscript: ret value.type
     case nt.Expr.Array: ret value.type
@@ -495,6 +503,7 @@ expressionType(expression nt.Expr*) nt.Type*:
 expressionPosition(expression nt.Expr*) org.FilePos:
     if expression == none: ret org.FilePos(line=0, column=0) ..
     match expression as value:
+    case nt.Expr.Zero: ret value.sourcePos
     case nt.Expr.DirectCall: ret value.sourcePos
     case nt.Expr.TemplatedDirectCall: ret value.sourcePos
     case nt.Expr.IndirectCall: ret value.sourcePos
@@ -504,6 +513,8 @@ expressionPosition(expression nt.Expr*) org.FilePos:
     case nt.Expr.Throw: ret value.sourcePos
     case nt.Expr.VarDefAssign: ret value.sourcePos
     case nt.Expr.Named: ret value.sourcePos
+    case nt.Expr.EnumVariant: ret value.sourcePos
+    case nt.Expr.InferredStructConstructor: ret value.sourcePos
     case nt.Expr.Try: ret expressionPosition(value.call)
     else: ret org.FilePos(line=0, column=0)
     ..
@@ -839,6 +850,10 @@ readExpression(a Analyzer*, flow Flow*, expression nt.Expr*, moving bool) !void:
                 ..
             ..
             try readCallArgument(a, flow, argument, expectedOwned, constructor)
+        ..
+    case nt.Expr.InferredStructConstructor:
+        for i := 0 to value.args.count():
+            try readCallArgument(a, flow, value.args.get(i), false, true)
         ..
     case nt.Expr.IndirectCall:
         isStringFree := false
@@ -1260,6 +1275,7 @@ checkStatement(a Analyzer*, flow Flow*, statement nt.Stmt*) !void:
             case nt.Expr.TemplatedDirectCall: position = discarded.sourcePos
             case nt.Expr.IndirectCall: position = discarded.sourcePos
             case nt.Expr.TemplatedIndirectCall: position = discarded.sourcePos
+            case nt.Expr.InferredStructConstructor: position = discarded.sourcePos
             else: position = position
             ..
             try diagnose(a, "OWNERSHIP_DISCARDED_RESULT", "owned result is discarded without being consumed", position, true)

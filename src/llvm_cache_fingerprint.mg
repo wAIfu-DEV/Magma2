@@ -3,6 +3,7 @@ mod llvm_cache_fingerprint
 # Stable serialization of module declarations and implementation bodies that
 # can affect lowering in an importing module. Bodies are serialized once per
 # module; references between declarations use stable identities.
+# @author codex (GPT6 Luna)
 
 use "std:builder" builder
 use "std:strconv" strconv
@@ -217,9 +218,21 @@ appendExpr(out builder.Builder*, expression nt.Expr*, depth u64) !void:
         case nt.Literal.Char32:
             try field(out, literal.value)
         ..
+    case nt.Expr.Zero:
+        try field(out, "zero-expr")
     case nt.Expr.Named:
         try field(out, "named-expr")
         try declIdentity(out, value.decl)
+    case nt.Expr.EnumVariant:
+        try field(out, "enum-variant-expr")
+        try field(out, value.name)
+        try declIdentity(out, value.decl)
+    case nt.Expr.InferredStructConstructor:
+        try field(out, "inferred-struct-constructor")
+        try declIdentity(out, value.decl)
+        for i := 0 to value.args.count():
+            try appendExpr(out, value.args.get(i), depth + 1)
+        ..
     case nt.Expr.MemberAccess:
         try field(out, "member")
         try appendExpr(out, value.owner, depth + 1)

@@ -1,5 +1,8 @@
 mod logger
 
+# Logging helper
+# @author codex (GPT6 Luna)
+
 use "std:writer" as wr
 use "std:io" as io
 

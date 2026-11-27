@@ -1,5 +1,9 @@
 mod decl_resolver
 
+# Used to resolve declarations per module or per scope, makes for easier and cheaper identification during link checking
+# @author devan
+# @authro codex (GPT6 Luna) - fixes and bloating the shit out of Decl
+
 use "std:hash_map" hm
 use "std:stable_list" ls
 use "std:allocator" alc
@@ -137,6 +141,8 @@ pub union ScopeKind(
     Block()
 )
 
+
+# wtf 🥲 all this shit is supposed to be in DeclKind
 pub Decl(
     kind DeclKind
     module Module*

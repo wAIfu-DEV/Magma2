@@ -1,5 +1,8 @@
 mod comperr
 
+# Compilation errors helper
+# @author devan
+
 use "std:errors" errs
 use "std:writer" wr
 use "std:fmt" fmt

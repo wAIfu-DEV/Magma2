@@ -120,10 +120,10 @@ pub closedContextError() error:
 pub newContext() !ptr:
     a := heap.allocator()
     state ContextState* = cast.reinterpret[ContextState](try a.alloc(sizeof ContextState))
-    memory.zero(state, sizeof ContextState)
+    memory.set(state, sizeof ContextState, 0)
     package := try utf8.utf8To16NT("Schannel")
     credentials SchannelCred
-    memory.zero(addrof credentials, sizeof SchannelCred)
+    memory.set(addrof credentials, sizeof SchannelCred, 0)
     credentials.version = SCHANNEL_CRED_VERSION
     credentials.flags = SCH_CRED_AUTO_CRED_VALIDATION
     expiry Timestamp
@@ -139,7 +139,7 @@ pub newContext() !ptr:
 pub open(context ptr, a allocator.Allocator, transport socket.Socket*, host str) !ptr:
     owner ContextState* = context
     state SessionState* = cast.reinterpret[SessionState](try a.alloc(sizeof SessionState))
-    memory.zero(state, sizeof SessionState)
+    memory.set(state, sizeof SessionState, 0)
     state.allocator = a
     state.transport = transport
     state.credential = addrof owner.credential

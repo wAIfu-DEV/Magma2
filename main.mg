@@ -1,5 +1,9 @@
 mod main
 
+# Entrypoint of the frontend, responsible for orchestration and flag handling
+# @author devan
+# @author codex (GPT6 Luna)
+
 use "std:io" io
 use "std:fs" fs
 use "std:cast" cast
@@ -34,7 +38,6 @@ use "src/compiler_backend" backend
 use "src/tool_versions" tools
 use "src/compiler_helpers" helpers
 use "src/compiler_timings" timings
-
 use "src/shared/global" gl
 use "src/shared/filectx" fctx
 use "src/lexer" lx
@@ -79,7 +82,7 @@ pub main(args str[]) !u32:
         explainCache=false
         version=false
         run=false
-        output="out"
+        output=""
         input=""
         emit="exe"
         help=false
@@ -89,20 +92,20 @@ pub main(args str[]) !u32:
     flagsParser := try flag.new(allocator, "magma")
     defer flagsParser.free()
 
-    flagsParser.unsigned("threads", 't',       addrof flags.threadCnt,      "maximum allowed concurrent threads for compilation, default -t0 (cpu core count)")
-    flagsParser.unsigned("opt", 'O',           addrof flags.optLevel,       "optimization level used by LLVM, default is -O3")
-    flagsParser.boolean("timings", 'T',        addrof flags.timings,        "prints timings for each steps of the compilation")
-    flagsParser.boolean("timings-per-file", 0, addrof flags.timingsPerFile, "prints lex, parse and check timings for each file")
-    flagsParser.boolean("debug", 'd',          addrof flags.debug,          "prints additional debug logs")
-    flagsParser.boolean("verbose", 'V',        addrof flags.verbose,        "prints more logs than --debug")
-    flagsParser.boolean("explain-cache", 0,    addrof flags.explainCache,   "prints the cache decision and miss reason for each module")
-    flagsParser.boolean("version", 'v',        addrof flags.version,        "prints the compiler's version, does not proceed with compilation")
-    flagsParser.boolean("run", 'r',            addrof flags.run,            "runs the executable after compilation")
-    flagsParser.string("output", 'o',          addrof flags.output,         "path to the output the compiler will write to")
-    flagsParser.string("input", 'i',           addrof flags.input,          "path to the input magma file, alternative to positional arg")
-    flagsParser.string("emit", 'e',            addrof flags.emit,           "what type of output the compiler should write ('exe','llvm') default is 'exe'")
-    flagsParser.boolean("help", 'h',           addrof flags.help,           "prints the available args for magma")
-    flagsParser.boolean("naked", 0,            addrof flags.naked,          "use NullAllocator and SingleThreadExecutor as the program default context")
+    flagsParser.unsigned("threads",        't', addrof flags.threadCnt,      "maximum allowed concurrent threads for compilation, default -t0 (cpu core count)")
+    flagsParser.unsigned("opt",            'O', addrof flags.optLevel,       "optimization level used by LLVM for executable and IR output, default is -O3")
+    flagsParser.boolean( "timings",        'T', addrof flags.timings,        "prints timings for each steps of the compilation")
+    flagsParser.boolean( "timings-per-file", 0, addrof flags.timingsPerFile, "prints lex, parse and check timings for each file")
+    flagsParser.boolean( "debug",          'd', addrof flags.debug,          "prints additional debug logs")
+    flagsParser.boolean( "verbose",        'V', addrof flags.verbose,        "prints more logs than --debug")
+    flagsParser.boolean( "explain-cache",    0, addrof flags.explainCache,   "prints the cache decision and miss reason for each module")
+    flagsParser.boolean( "version",        'v', addrof flags.version,        "prints the compiler's version, does not proceed with compilation")
+    flagsParser.boolean( "run",            'r', addrof flags.run,            "runs the executable after compilation")
+    flagsParser.string(  "output",         'o', addrof flags.output,         "path to the output the compiler will write to")
+    flagsParser.string(  "input",          'i', addrof flags.input,          "path to the input magma file, alternative to positional arg")
+    flagsParser.string(  "emit",           'e', addrof flags.emit,           "what type of output the compiler should write ('exe','llvm') default is 'exe'")
+    flagsParser.boolean( "help",           'h', addrof flags.help,           "prints the available args for magma")
+    flagsParser.boolean( "naked",            0, addrof flags.naked,          "use NullAllocator and SingleThreadExecutor as the program default context")
 
     flagRes := try flagsParser.parse(args)
     defer flagRes.free()
@@ -111,6 +114,13 @@ pub main(args str[]) !u32:
     emitLLVM := flags.emit == "llvm"
     if emitExecutable == false && emitLLVM == false:
         throw errors.invalidArgument("--emit must be either 'exe' or 'llvm'")
+    ..
+    if flags.output == "":
+        if emitLLVM:
+            flags.output = "out.ll"
+        else:
+            flags.output = "out"
+        ..
     ..
     if flags.run && emitLLVM:
         throw errors.invalidArgument("--run cannot be used with --emit llvm")
@@ -125,25 +135,30 @@ pub main(args str[]) !u32:
         cores = flags.threadCnt
     ..
     minCores u64 = 1
-    single := executor.singleThread()
-    scheduler := single
+
+    scheduler := executor.singleThread()
+
+    # ThreadPool needs stable storage
     tp thread_pool.ThreadPool* = try allocator.allocT[thread_pool.ThreadPool](1)
-    onerror allocator.free(tp)
-    unsafe: *tp = thread_pool.ThreadPool(state=none) ..
     defer allocator.free(tp)
-    defer tp.closeIfActive()
+
     if cores > 1:
-        unsafe: *tp = try thread_pool.new(allocator, minCores, cores, 512, minCores) .. # TODO: 512 might be an issue, have to check
+        unsafe *tp = try thread_pool.new(allocator, minCores, cores, 512, minCores) # TODO: 512 might be an issue, have to check
         scheduler = tp.executor()
+    else:
+        unsafe *tp = thread_pool.ThreadPool(state=none)
     ..
+    defer tp.closeIfActive()
+
     ctx = context.new(allocator, scheduler)
 
     gl.stdin = try io.stdin()
     gl.stdout = try io.stdout()
 
+    defer gl.stdout.flush()
+
     if flags.version:
         try gl.stdout.writeLn(compiler_version.VERSION)
-        try gl.stdout.flush()
         ret 0
     ..
 
@@ -153,15 +168,14 @@ pub main(args str[]) !u32:
 
     if flags.help || args.count() == 1:
         try flagsParser.writeUsage(gl.stdout.writer())
-        try gl.stdout.flush()
         ret 0
     ..
 
-    logLevel := log.LogLevel.DEFAULT
+    logLevel log.LogLevel = .DEFAULT
     if flags.verbose:
-        logLevel = log.LogLevel.VERBOSE
+        logLevel = .VERBOSE
     elif flags.debug:
-        logLevel = log.LogLevel.DEBUG
+        logLevel = .DEBUG
     ..
 
     gl.logger = log.new(gl.stdout.writer(), logLevel)
@@ -186,7 +200,10 @@ pub main(args str[]) !u32:
 
     try gl.initGlobal()
     gl.naked = flags.naked
-    try gl.startLog(log.LogLevel.DEBUG).writeLn("# DATA INIT").end()
+
+    try gl.startLog(.DEBUG)
+        .writeLn("# DATA INIT")
+        .end()
 
     # initialize required pipeline data
     try tkt.initKwMap()
@@ -198,20 +215,28 @@ pub main(args str[]) !u32:
     # INPUT FILE #
     # ---------- #
 
-    try gl.startLog(log.LogLevel.DEBUG).writeLn("# INPUT FILE").end()
+    try gl.startLog(.DEBUG)
+        .writeLn("# INPUT FILE")
+        .end()
 
     gl.cwd = try fs.currentDir()
     gl.stdLibRoot = try path.join([]str(gl.cwd, "std"))
 
     # startLog returns a writer and locks the stdout for other threads until .end is called
     # this keeps printed lines uninterrupted by concurrent writes
-    try gl.startLog(log.LogLevel.DEBUG).write("CWD ").writeLn(gl.cwd).end()
+    try gl.startLog(.DEBUG)
+        .write("CWD ")
+        .writeLn(gl.cwd)
+        .end()
 
     absolute := try mk_abs.makeAbsolute(filePath, "")
     defer absolute.free()
     gl.mainUniqueName = try strings.copy(absolute)
 
-    try gl.startLog(log.LogLevel.DEBUG).write("PATH ").writeLn(absolute).end()
+    try gl.startLog(.DEBUG)
+        .write("PATH ")
+        .writeLn(absolute)
+        .end()
 
     fileCtx := try opf.openFile(absolute)
     f := addrof fileCtx
@@ -222,19 +247,25 @@ pub main(args str[]) !u32:
         try gl.files.setBorrowed(absolute, f)
     ..
 
-    try gl.startLog(log.LogLevel.DEBUG).write("SETUP ").writeUint64(time.elapsedUs(startTicks)).writeLn("µs").end()
+    try gl.startLog(.DEBUG)
+        .write("SETUP ")
+        .writeUint64(time.elapsedUs(startTicks))
+        .writeLn("µs")
+        .end()
 
     # ---------------------- #
     # MULTITHREADED PIPELINE #
     # ---------------------- #
 
-    try gl.startLog(log.LogLevel.DEBUG).writeLn("# MULTITHREADED PIPELINE").end()
+    try gl.startLog(.DEBUG)
+        .writeLn("# MULTITHREADED PIPELINE")
+        .end()
 
     pipelineStartTick := time.ticks()
 
     # Futures use the selected executor: caller-thread execution at -t1, thread pool otherwise.
     future := try pipe.pipelineAsync(f)
-    toolVersionFuture fut.Future[str], toolLaunchError error = tools.startToolVersionProbe()
+    toolVersionFuture, toolLaunchError := tools.startToolVersionProbe()
     if toolLaunchError.nok():
         helpers.discardErrorFuture(move future)
         throw toolLaunchError
@@ -267,7 +298,9 @@ pub main(args str[]) !u32:
 
     pipelineElapsedMs := time.elapsedMs(pipelineStartTick)
 
-    try gl.startLog(log.LogLevel.DEBUG).writeLn("after multithreaded pipeline").end()
+    try gl.startLog(.DEBUG)
+        .writeLn("after multithreaded pipeline")
+        .end()
 
     # ----------------------------- #
     # SYNC SEMANTIC AND TYPE CHECKS #
@@ -280,7 +313,9 @@ pub main(args str[]) !u32:
         throw semanticErr
     ..
 
-    try gl.startLog(log.LogLevel.DEBUG).writeLn("after semcheck").end()
+    try gl.startLog(.DEBUG)
+        .writeLn("after semcheck")
+        .end()
 
     # ------------- #
     # BITCODE CACHE #
@@ -289,19 +324,7 @@ pub main(args str[]) !u32:
     backendStartTick := time.ticks()
     cacheLookupStartTick := time.ticks()
 
-    # Cache validation belongs after the complete checked graph and before any
-    # module lowering.
-    llvmAsVersion := try strings.concat("\nllvm-as:\n", toolVersions.llvmVersionText)
-    defer llvmAsVersion.free()
-    optVersionPrefix := try strings.concat(llvmAsVersion, "\nopt:\n")
-    defer optVersionPrefix.free()
-    optVersion := try strings.concat(optVersionPrefix, toolVersions.optVersionText)
-    defer optVersion.free()
-    clangVersionPrefix := try strings.concat(optVersion, "\nclang:\n")
-    defer clangVersionPrefix.free()
-    toolVersionText := try strings.concat(clangVersionPrefix, toolVersions.clangVersionText)
-    defer toolVersionText.free()
-    cacheVersion := try strings.concat(compiler_version.VERSION, toolVersionText)
+    cacheVersion := try helpers.getCacheVersion(addrof toolVersions)
     defer cacheVersion.free()
     cache := try llvm_cache.open(gl.cwd, cacheVersion, compiler_version.TARGET_TRIPLE)
     defer cache.close()
@@ -309,9 +332,15 @@ pub main(args str[]) !u32:
     if flags.explainCache:
         cacheLocation := try path.join([]str(gl.cwd, ".magma"))
         defer cacheLocation.free()
-        try gl.startLog(log.LogLevel.DEFAULT).write("LLVM cache: ").writeLn(cacheLocation).end()
+        try gl.startLog(.DEFAULT)
+            .write("LLVM cache: ")
+            .writeLn(cacheLocation)
+            .end()
+        
         if cache.discardedIncompatible:
-            try gl.startLog(log.LogLevel.DEFAULT).writeLn("LLVM cache namespace discarded: compiler or LLVM version changed")
+            try gl.startLog(.DEFAULT)
+                .writeLn("LLVM cache namespace discarded: compiler or LLVM version changed")
+                .end()
         ..
     ..
 
@@ -321,7 +350,10 @@ pub main(args str[]) !u32:
     pendingModules := try backend.resolveCacheLookups(checkedFiles, addrof cache, flags.explainCache, f.path, flags.debug)
     defer pendingModules.free()
 
-    try gl.startLog(log.LogLevel.DEBUG).writeLn("after resolve cache").end()
+    try gl.startLog(.DEBUG)
+        .writeLn("after resolve cache")
+        .end()
+
     cacheLookupElapsedMs := time.elapsedMs(cacheLookupStartTick)
 
     # ----------------------- #
@@ -336,13 +368,15 @@ pub main(args str[]) !u32:
     defer linkOutput.free()
     linkStartTick := time.ticks()
     if emitLLVM:
-        try llvm_cache.linkModulesToIR(addrof cache, checkedFiles, linkOutput)
+        try llvm_cache.linkModulesToIR(addrof cache, checkedFiles, flags.optLevel, linkOutput)
     else:
         try llvm_cache.linkModules(addrof cache, checkedFiles, flags.optLevel, cores, linkOutput, true)
     ..
     linkElapsedMs := time.elapsedMs(linkStartTick)
 
-    try gl.startLog(log.LogLevel.DEBUG).writeLn("after link modules").end()
+    try gl.startLog(.DEBUG)
+        .writeLn("after link modules")
+        .end()
 
     elapsedTotalMs := time.elapsedMs(startTicks)
     backendElapsedMs := time.elapsedMs(backendStartTick)
@@ -361,8 +395,6 @@ pub main(args str[]) !u32:
         ret runCode
     ..
 
-    # TODO: collect and merge 
-    try gl.stdout.flush()
     ret pipeErr.code()
 ..
 

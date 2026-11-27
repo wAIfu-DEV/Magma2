@@ -1,5 +1,9 @@
 mod main
 
+# Used for bootstrap building using the compiler implemented in golang
+# @author devan
+# @author codex (GPT6 Luna)
+
 use "std:process" proc
 use "std:fs"      fs
 use "std:path"    path
@@ -47,6 +51,7 @@ writeTargetInfo() !void:
 
     arguments := try ls.new[str](heap.allocator(), freeString)
     defer arguments.free()
+    # TODO: i think this sucks
     try arguments.pushRight(try strings.copy("src/llvm_target_info.cpp"))
     try appendFlags(addrof arguments, cxxFlags)
     try appendFlags(addrof arguments, linkFlags)

@@ -56,7 +56,7 @@ StableList[T].push(value $T) !u64:
             fg.drop[T](move value)
             throw allocationError
         ..
-        mem.zero(page, pageBytes)
+        mem.set(page, pageBytes, 0)
         pageSlot u64, pageSlotError error = this.pages.expandRight()
         if pageSlotError.nok():
             this.allocator.free(page)

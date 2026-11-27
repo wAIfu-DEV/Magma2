@@ -1,10 +1,13 @@
 mod compiler_backend
 
+# Not sure what this does, thanks GPT for making this unreadable
+# @author codex (GPT6 Luna)
+
 use "std:time" time
 use "std:errors" errors
 use "std:strings" strings
 use "std:stable_list" stable
-use "std:executor" as executor
+use "std:executor" executor
 use "std:future" fut
 use "helper/logger" log
 use "shared/global" gl

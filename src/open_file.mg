@@ -1,5 +1,8 @@
 mod open_file
 
+# Opens and does some pre-processing on magma source files 
+# @author devan
+
 use "std:fs" fs
 use "std:file" file
 use "std:buffered" buf
@@ -43,6 +46,7 @@ pub openFile(path str) !$fctx.FileCtx:
     fc.content = try rd.read(f.count()) # TODO: add readall util
 
     # register every line start idx
+    # use for compiler errors
     newline := strgs.byteAt("\n", 0)
     fc.lineIdx.pushRight(0)
     for cIdx := 0 to fc.content.countBytes():

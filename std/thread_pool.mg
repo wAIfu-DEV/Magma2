@@ -227,9 +227,9 @@ growWorkerStorage(state State*) !bool:
     newStates u8* = try state.allocator.allocT[u8](newCapacity)
     onerror state.allocator.free(newStates)
 
-    mem.zero(newWorkers, try checked.byteCount[thread.Thread](newCapacity))
-    mem.zero(newContexts, try checked.byteCount[WorkerContext*](newCapacity))
-    mem.zero(newStates, newCapacity)
+    mem.set(newWorkers, try checked.byteCount[thread.Thread](newCapacity), 0)
+    mem.set(newContexts, try checked.byteCount[WorkerContext*](newCapacity), 0)
+    mem.set(newStates, newCapacity, 0)
 
     for i u64 = 0 to state.workerCapacity:
         newWorker thread.Thread* = cast.reinterpret[thread.Thread](cast.utop(cast.ptou(newWorkers) + (i * sizeof thread.Thread)))
@@ -452,7 +452,7 @@ newConfigured(a alc.Allocator, minWorkers u64, maxWorkers u64, queueCapacity u64
     state State* = try a.allocT[State](1)
     onerror a.free(state)
 
-    mem.zero(state, sizeof State)
+    mem.set(state, sizeof State, 0)
     tasks Task* = try a.allocT[Task](queueCapacity)
     onerror a.free(tasks)
 
@@ -465,9 +465,9 @@ newConfigured(a alc.Allocator, minWorkers u64, maxWorkers u64, queueCapacity u64
     workerStates u8* = try a.allocT[u8](minWorkers)
     onerror a.free(workerStates)
 
-    mem.zero(workers, try checked.byteCount[thread.Thread](minWorkers))
-    mem.zero(workerContexts, try checked.byteCount[WorkerContext*](minWorkers))
-    mem.zero(workerStates, minWorkers)
+    mem.set(workers, try checked.byteCount[thread.Thread](minWorkers), 0)
+    mem.set(workerContexts, try checked.byteCount[WorkerContext*](minWorkers), 0)
+    mem.set(workerStates, minWorkers, 0)
 
     lock := spinlock.new()
     work generation_wait.Wait = try generation_wait.new()

@@ -1,5 +1,8 @@
 mod tool_versions
 
+# Probe for llvm tooling versions, used for cache fingerprinting
+# @author codex (GPT6 Luna)
+
 use "std:process" proc
 use "std:strings" strings
 use "std:errors" errors

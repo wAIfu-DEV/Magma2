@@ -1,5 +1,8 @@
 mod compiler_timings
 
+# Used for printing timings collected during compilation
+# @authro codex (GPT6 Luna)
+
 use "std:sort" sort
 use "std:list" ls
 use "std:time" time

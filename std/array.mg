@@ -95,7 +95,7 @@ pub newWithSize[T](a alc.Allocator, usable u64, padLeft u64, padRight u64) !$Arr
 
     # All elements exposed by usable must have a defined value. Zero the full
     # data region so padding that is later consumed by expand is defined too.
-    mem.zero(data, dataSize)
+    mem.set(data, dataSize, 0)
 
     state State* = none
     # SAFETY: headAndData is a fresh allocation sized for State plus data.
@@ -253,7 +253,7 @@ Array[T].resize(a alc.Allocator, usable u64, padLeft u64, padRight u64, cleanup 
         firstNew ptr = cast.utop(cast.ptou(slc.toPtr(items)) + (oldCount * sizeof T))
         newCount u64 = usable - oldCount
         newBytes u64 = try byteSize[T](newCount)
-        mem.zero(firstNew, newBytes)
+        mem.set(firstNew, newBytes, 0)
     ..
 ..
 
@@ -395,7 +395,7 @@ Array[T].expandRight(a alc.Allocator) !u64:
     idx u64 = try expandRightStorage[T](this, a)
     items := this.view()
     bounded idx < items.count():
-        mem.zero(addrof items[idx], sizeof T)
+        mem.set(addrof items[idx], sizeof T, 0)
     ..
     ret idx
 ..
@@ -422,7 +422,7 @@ Array[T].expandLeft(a alc.Allocator) !void:
     try expandLeftStorage[T](this, a)
     items := this.view()
     bounded 0 < items.count():
-        mem.zero(addrof items[0], sizeof T)
+        mem.set(addrof items[0], sizeof T, 0)
     ..
 ..
 

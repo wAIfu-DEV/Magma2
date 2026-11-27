@@ -1,5 +1,9 @@
 mod pipeline
 
+# Encapsulation of the multithreaded part of the compilation (lexing, parsing)
+# @author devan - Overall architecture
+# @author codex (GPT6 Luna) - checkGraph
+
 use "std:future" future
 use "std:abort" abort
 use "std:errors" errs

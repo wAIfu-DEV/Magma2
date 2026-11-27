@@ -102,7 +102,7 @@ grow(debug DebugAllocator*) !void:
         throw errors.wouldOverflow("debug allocator metadata size overflow")
     ..
     newEntries := try target.allocT[Entry](newCapacity)
-    memory.zero(newEntries, newCapacity * sizeof Entry)
+    memory.set(newEntries, newCapacity * sizeof Entry, 0)
     i u64 = 0
     writeIndex u64 = 0
     loop i < debug.capacityValue:
@@ -257,7 +257,7 @@ pub new(target allocator.Allocator, options Options) !$DebugAllocator:
     ..
     entries := try target.allocT[Entry](options.initialCapacity)
     onerror target.free(entries)
-    memory.zero(entries, options.initialCapacity * sizeof Entry)
+    memory.set(entries, options.initialCapacity * sizeof Entry, 0)
     targetPtr := try target.allocT[allocator.Allocator](1)
     unsafe:
         *targetPtr = target

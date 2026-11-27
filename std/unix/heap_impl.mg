@@ -100,7 +100,7 @@ pub alloc(nBytes u64) !$u8*:
 # @returns owned region of memory
 pub allocZero(nBytes u64) !$u8*:
     out u8* = try heapAlloc(none, nBytes)
-    mem.zero(out, nBytes)
+    mem.set(out, nBytes, 0)
     ret out
 ..
 
@@ -144,7 +144,7 @@ pub reallocZero(in ptr, nBytes u64, prevNbytes u64) !$u8*:
 
     # zero end of region
     outEnd ptr = cast.utop(cast.ptou(out) + prevNbytes)
-    mem.zero(outEnd, nBytes - prevNbytes)
+    mem.set(outEnd, nBytes - prevNbytes, 0)
 
     heapFree(none, in)
     ret out

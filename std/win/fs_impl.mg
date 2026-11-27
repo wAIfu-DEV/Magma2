@@ -280,7 +280,7 @@ pub readRange(path str, output ptr, count u64, offset u64) !u64:
     ..
     defer ext_CloseHandle(handle)
     overlapped := [32]u8
-    memory.zero(slices.toPtr(overlapped), 32)
+    memory.set(slices.toPtr(overlapped), 32, 0)
     unsafe:
         low u32* = cast.utop(cast.ptou(slices.toPtr(overlapped)) + 16)
         high u32* = cast.utop(cast.ptou(slices.toPtr(overlapped)) + 20)

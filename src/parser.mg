@@ -1,5 +1,10 @@
 mod parser
 
+# Processes tokens and assigns semantic meaning based on context
+# Recursive decent parser with minimal speculative decoding
+# @author devan - Overall architecture
+# @author codex (GPT6 Luna) - Completion
+
 use "std:memory" mem
 use "std:list" ls
 use "std:array" arr
@@ -34,6 +39,7 @@ Parser(
     pendingNoCtx bool,
     pendingDestructor bool,
     pruneNext bool,
+    memberContinuationForbiddenDepth u64,
 )
 
 Parser.peek() !tkt.Token:
@@ -550,8 +556,15 @@ parseExpression(p Parser*, minPrec u8) !nt.Expr*:
             ret left
         ..
         op := try p.peek()
-        # A comma or newline ends the current expression. Keep this explicit
-        # so list delimiters cannot be consumed as part of Pratt parsing.
+        # A comma or newline ends the current expression, except for the
+        # single-newline member continuation allowed outside argument lists.
+        if op.kwType == tkt.KwType.NEWLINE && p.memberContinuationForbiddenDepth == 0 && p.idx + 1 < p.file.tokens.count():
+            following := try p.file.tokens.get(p.idx + 1)
+            if following.kwType == tkt.KwType.DOT:
+                p.consume()
+                continue
+            ..
+        ..
         if op.kwType == tkt.KwType.COMMA || op.kwType == tkt.KwType.NEWLINE || op.kwType == tkt.KwType.COLON:
             ret left
         ..
@@ -659,6 +672,8 @@ parseCallArgs(p Parser*) !$nt.NodeArray[nt.Expr*]:
     try ensureKwType(p, opening, tkt.KwType.PAREN_OP, "expected opening parenthesis for call", "expected: (")
     p.consume()
 
+    p.memberContinuationForbiddenDepth = p.memberContinuationForbiddenDepth + 1
+
     try consumeNewLines(p)
 
     values := nt.emptyNodeArray[nt.Expr*]()
@@ -714,6 +729,7 @@ parseCallArgs(p Parser*) !$nt.NodeArray[nt.Expr*]:
     closing := try p.peek()
     try ensureKwType(p, closing, tkt.KwType.PAREN_CL, "expected closing parenthesis after call arguments", "expected: )")
     p.consume()
+    p.memberContinuationForbiddenDepth = p.memberContinuationForbiddenDepth - 1
 
     ret move values
 ..
@@ -740,6 +756,11 @@ parseLiteral(p Parser*) !nt.Expr*:
 
 parseExprPrefix(p Parser*) !nt.Expr*:
     t := try p.peek()
+
+    if t.kwType == tkt.KwType.ZERO:
+        p.consume()
+        ret try makeExpr(p, nt.Expr.Zero(type=none, sourcePos=t.pos))
+    ..
 
     if t.kwType == tkt.KwType.TRUE || t.kwType == tkt.KwType.FALSE || t.kwType == tkt.KwType.NONE_LIT:
         p.consume()
@@ -805,6 +826,7 @@ parseExprPrefix(p Parser*) !nt.Expr*:
             ..
             arguments := nt.emptyExpressionArray()
             p.idx = argumentStart
+            p.memberContinuationForbiddenDepth = p.memberContinuationForbiddenDepth + 1
             for _ := argumentStart to lastArgumentStart:
                 if p.idx >= lastArgumentStart:
                     break
@@ -821,6 +843,7 @@ parseExprPrefix(p Parser*) !nt.Expr*:
             if p.idx != lastArgumentStart:
                 try errorFatal(p, "LLVM_ARGUMENTS", "could not parse @llvm operands", "the result type must be the final argument", operation.pos)
             ..
+            p.memberContinuationForbiddenDepth = p.memberContinuationForbiddenDepth - 1
             p.idx = lastArgumentStart
             resultType := try parseType(p)
             if p.idx != closingIndex:
@@ -885,6 +908,20 @@ parseExprPrefix(p Parser*) !nt.Expr*:
         p.consume()
         call := try parseExpression(p, 80)
         ret try makeExpr(p, nt.Expr.Try(type=none, call=call))
+    ..
+
+    if t.kwType == tkt.KwType.DOT:
+        p.consume()
+        variant := try p.peek()
+        if variant.kwType == tkt.KwType.PAREN_OP:
+            args := try parseCallArgs(p)
+            ret try makeExpr(p, nt.Expr.InferredStructConstructor(type=none, decl=none, args=move args, sourcePos=t.pos))
+        ..
+        if variant.type != tkt.TkType.NAME:
+            try errorFatal(p, "ENUM_VARIANT_ACCESS", "expected enum variant name after '.'", "expected: .Variant", variant.pos)
+        ..
+        p.consume()
+        ret try makeExpr(p, nt.Expr.EnumVariant(type=none, name=variant.repr, decl=none, sourcePos=t.pos))
     ..
 
     if t.type == tkt.TkType.NAME && t.repr == "move":
@@ -1182,6 +1219,8 @@ parseStatement(p Parser*) !nt.Stmt*:
     if t.kwType == tkt.KwType.NEWLINE:
         p.consume()
         ret try makeStmt(p, nt.Stmt.Expression(expr=try makeExpr(p, nt.Expr.Empty())))
+    elif t.kwType == tkt.KwType.WITH:
+        ret try parseWithStmt(p)
     elif t.kwType == tkt.KwType.RETURN:
         p.consume()
         expr := try makeExpr(p, nt.Expr.Empty())
@@ -1459,6 +1498,32 @@ parseVariableStatement(p Parser*) !nt.Stmt*:
     localDecl := try registerLocalDecl(p, name, type, nameTk.pos)
     expr := try makeExpr(p, nt.Expr.VarDef(type=type, name=name, decl=localDecl, boundedCount="", sourcePos=nameTk.pos))
     ret try makeStmt(p, nt.Stmt.Expression(expr=expr))
+..
+
+parseWithStmt(p Parser*) !nt.Stmt*:
+    p.consume()
+    oldScope := p.scope
+    withScope decl.Scope* = none
+    if p.scope != none:
+        p.scope = try p.scope.registerScope(decl.ScopeKind.Block())
+        withScope = p.scope
+    ..
+
+    # Parse the local expression as a statement so local declarations are
+    # registered in this scope and execute before the defer is activated.
+    local := try parseStatement(p)
+    thenToken := try p.peek()
+    try ensureKwType(p, thenToken, tkt.KwType.THEN, "expected 'then' after with local expression", "expected: with <local expression> then <deferred expression>:")
+    p.consume()
+    deferred := try parseExpression(p, 0)
+    body := try parseBody(p)
+
+    statements := nt.emptyNodeArray[nt.Stmt*]()
+    try statements.pushRight(ctx.alloc, local)
+    try statements.pushRight(ctx.alloc, try makeStmt(p, nt.Stmt.Defer(expr=deferred, body=none)))
+    try statements.pushRight(ctx.alloc, body)
+    p.scope = oldScope
+    ret try makeStmt(p, nt.Stmt.Body(statements=move statements, scope=withScope))
 ..
 
 parseIfStmt(p Parser*) !nt.Stmt*:
@@ -2865,5 +2930,6 @@ initCtx(f fctx.FileCtx*) !Parser:
         pendingNoCtx=false,
         pendingDestructor=false,
         pruneNext=false,
+        memberContinuationForbiddenDepth=0,
     )
 ..

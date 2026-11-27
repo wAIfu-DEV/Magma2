@@ -380,7 +380,7 @@ connectTransport(host str, service str, secure bool, options Options) !$Client:
     onerror transport.close()
     try transport.connect(endpoints[0])
     client Client
-    memory.zero(addrof client, sizeof Client)
+    memory.set(addrof client, sizeof Client, 0)
     client.allocator = a
     client.resolver = move resolver
     client.transport = move transport

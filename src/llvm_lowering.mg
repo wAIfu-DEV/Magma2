@@ -2,6 +2,8 @@ mod llvm_lowering
 
 # LLVM type and symbol spelling for the checked Magma AST. Function bodies are
 # emitted by the expression/control-flow lowering routines built on this file.
+# @author devan - Original architecture
+# @author codex (GPT6 Luna) - Implementation
 
 use "std:hash" hash
 use "std:strings" strings
@@ -508,6 +510,9 @@ MatchBinding(
 
 LoweringState(
     output builder.Builder*
+    entryAllocas builder.Builder*
+    entryInitializers builder.Builder*
+    entryValueInitializers builder.Builder*
     returnType nt.Type*
     nextValue u64
     nextBlock u64
@@ -530,6 +535,30 @@ LoweringState(
     traceGlobals builder.Builder*
     nextTraceSite u64
 )
+
+# Fixed-size storage belongs in the entry block. Keeping allocation separate
+# from initialization lets the store remain on the control-flow path where the
+# value becomes live, while LLVM sees a canonical static alloca.
+appendAlloca(out builder.Builder*, resultPrefix str, resultId str, type str, count str, alignment str) !void:
+    try out.appendBorrowed("  ")
+    try out.appendBorrowed(resultPrefix)
+    try out.appendCopy(resultId)
+    try out.appendBorrowed(" = alloca ")
+    try out.appendCopy(type)
+    if count.countBytes() > 0:
+        try out.appendBorrowed(", i64 ")
+        try out.appendCopy(count)
+    ..
+    if alignment.countBytes() > 0:
+        try out.appendBorrowed(", align ")
+        try out.appendBorrowed(alignment)
+    ..
+    try out.appendBorrowed("\n")
+..
+
+appendEntryAlloca(state LoweringState*, resultPrefix str, resultId str, type str, count str, alignment str) !void:
+    try appendAlloca(state.entryAllocas, resultPrefix, resultId, type, count, alignment)
+..
 
 appendTraceGlobalString(out builder.Builder*, name str, value str) !void:
     length := try strconv.formatUint(value.countBytes() + 1)
@@ -630,7 +659,7 @@ implicitContextTypeName(declaration dclr.Decl*) !$str:
     ret try typeName(context.declType)
 ..
 
-appendFunctionContextSlot(out builder.Builder*, declaration dclr.Decl*, hasContext bool) !$u64:
+appendFunctionContextSlot(entryAllocas builder.Builder*, entryInitializers builder.Builder*, declaration dclr.Decl*, hasContext bool) !$u64:
     if hasContext:
         ret 0
     ..
@@ -645,15 +674,12 @@ appendFunctionContextSlot(out builder.Builder*, declaration dclr.Decl*, hasConte
     defer contextType.free()
     id := try strconv.formatUint(context.id)
     defer id.free()
-    try out.appendBorrowed("  %slot")
-    try out.appendCopy(id)
-    try out.appendBorrowed(" = alloca ")
-    try out.appendCopy(contextType)
-    try out.appendBorrowed("\n  store ")
-    try out.appendCopy(contextType)
-    try out.appendBorrowed(" zeroinitializer, ptr %slot")
-    try out.appendCopy(id)
-    try out.appendBorrowed("\n")
+    try appendAlloca(entryAllocas, "%slot", id, contextType, "", "")
+    try entryInitializers.appendBorrowed("  store ")
+    try entryInitializers.appendCopy(contextType)
+    try entryInitializers.appendBorrowed(" zeroinitializer, ptr %slot")
+    try entryInitializers.appendCopy(id)
+    try entryInitializers.appendBorrowed("\n")
     ret context.id
 ..
 
@@ -674,7 +700,7 @@ newLoopSlotList() !$ls.List[u64]:
     ret try ls.new[u64](ctx.alloc, none)
 ..
 
-appendZeroedLocalSlotAlloca(state LoweringState*, declaration dclr.Decl*, type nt.Type*, seen ls.List[u64]*) !void:
+appendLocalSlotAlloca(state LoweringState*, declaration dclr.Decl*, type nt.Type*, seen ls.List[u64]*) !void:
     if declaration == none || type == none:
         ret
     ..
@@ -688,18 +714,7 @@ appendZeroedLocalSlotAlloca(state LoweringState*, declaration dclr.Decl*, type n
     defer lowered.free()
     id := try strconv.formatUint(declaration.id)
     defer id.free()
-    try state.output.appendBorrowed("  %slot")
-    try state.output.appendCopy(id)
-    try state.output.appendBorrowed(" = alloca ")
-    try state.output.appendCopy(lowered)
-    # Magma locals are zero initialized. Initialize every hoisted local slot
-    # here so all control-flow paths, including destructuring success paths,
-    # start from a defined value before a declaration may overwrite it.
-    try state.output.appendBorrowed("\n  store ")
-    try state.output.appendCopy(lowered)
-    try state.output.appendBorrowed(" zeroinitializer, ptr %slot")
-    try state.output.appendCopy(id)
-    try state.output.appendBorrowed("\n")
+    try appendEntryAlloca(state, "%slot", id, lowered, "", "")
 ..
 
 emitForLoopIndexAllocas(state LoweringState*, statement nt.Stmt*, seen ls.List[u64]*) !void:
@@ -728,7 +743,7 @@ emitForLoopIndexAllocas(state LoweringState*, statement nt.Stmt*, seen ls.List[u
             if index.decl == none:
                 throw "for-loop index has no linked declaration"
             ..
-            try appendZeroedLocalSlotAlloca(state, index.decl, index.type, seen)
+            try appendLocalSlotAlloca(state, index.decl, index.type, seen)
         else:
             throw "for-loop index must be an initialized variable"
         ..
@@ -744,7 +759,7 @@ emitForLoopIndexAllocas(state LoweringState*, statement nt.Stmt*, seen ls.List[u
     case nt.Stmt.Match:
         if value.bindingDecl != none:
             bindingType := try expressionType(value.expression)
-            try appendZeroedLocalSlotAlloca(state, value.bindingDecl, bindingType, seen)
+            try appendLocalSlotAlloca(state, value.bindingDecl, bindingType, seen)
         ..
         for i := 0 to value.cases.count():
             item := try value.cases.get(i)
@@ -755,20 +770,20 @@ emitForLoopIndexAllocas(state LoweringState*, statement nt.Stmt*, seen ls.List[u
         expressionNode := nt.loadExpressionNode(value.expr)
         match addrof expressionNode as expressionValue:
         case nt.Expr.VarDef:
-            try appendZeroedLocalSlotAlloca(state, expressionValue.decl, expressionValue.type, seen)
+            try appendLocalSlotAlloca(state, expressionValue.decl, expressionValue.type, seen)
         case nt.Expr.VarDefAssign:
             if expressionValue.type == none:
                 throw "initialized variable has no checked type during slot allocation"
             ..
-            try appendZeroedLocalSlotAlloca(state, expressionValue.decl, expressionValue.type, seen)
+            try appendLocalSlotAlloca(state, expressionValue.decl, expressionValue.type, seen)
         case nt.Expr.VarDefAssignDestructure:
             callType := try expressionType(expressionValue.call)
             innerType := try throwingValueType(callType)
             if expressionValue.valueDecl != none:
-                try appendZeroedLocalSlotAlloca(state, expressionValue.valueDecl, innerType, seen)
+                try appendLocalSlotAlloca(state, expressionValue.valueDecl, innerType, seen)
             ..
             if expressionValue.errorDecl != none:
-                try appendZeroedLocalSlotAlloca(state, expressionValue.errorDecl, expressionValue.errorDecl.declType, seen)
+                try appendLocalSlotAlloca(state, expressionValue.errorDecl, expressionValue.errorDecl.declType, seen)
             ..
         else:
             expressionNode = expressionNode
@@ -843,8 +858,17 @@ expressionType(expression nt.Expr*) !nt.Type*:
     case nt.Expr.Literal:
         if value.type == none: throw "literal has no checked type in LLVM lowering" ..
         ret value.type
+    case nt.Expr.Zero:
+        if value.type == none: throw "zero expression has no checked type in LLVM lowering" ..
+        ret value.type
     case nt.Expr.Named:
         if value.type == none: throw "named expression has no checked type in LLVM lowering" ..
+        ret value.type
+    case nt.Expr.EnumVariant:
+        if value.type == none: throw "enum variant has no checked type in LLVM lowering" ..
+        ret value.type
+    case nt.Expr.InferredStructConstructor:
+        if value.type == none: throw "inferred struct constructor has no checked type in LLVM lowering" ..
         ret value.type
     case nt.Expr.MemberAccess:
         if value.type == none: throw "member access has no checked type in LLVM lowering" ..
@@ -1253,6 +1277,8 @@ emitConstantStructConstructor(declaration dclr.Decl*, args nt.NodeArray[nt.Expr*
 emitConstantExpression(expression nt.Expr*) !$str:
     node := nt.loadExpressionNode(expression)
     match addrof node as value:
+    case nt.Expr.Zero:
+        ret try strings.copy("zeroinitializer")
     case nt.Expr.Literal:
         match value.literal as literal:
         case nt.Literal.Number:
@@ -1334,6 +1360,16 @@ emitConstantExpression(expression nt.Expr*) !$str:
             value = value
         ..
         throw "name is not a compile-time constant"
+    case nt.Expr.EnumVariant:
+        if value.decl == none:
+            throw "unresolved enum variant in compile-time constant"
+        ..
+        ret try enumVariantValue(value.decl)
+    case nt.Expr.InferredStructConstructor:
+        if value.decl == none:
+            throw "unresolved inferred struct constructor in compile-time constant"
+        ..
+        ret try emitConstantStructConstructor(value.decl, value.args)
     case nt.Expr.MemberAccess:
         declaration dclr.Decl* = none
         memberNode := nt.loadExpressionNode(value.member)
@@ -1461,6 +1497,8 @@ emitResolvedCall(state LoweringState*, kind nt.CallKind, target dclr.Decl*, owne
 
 emitExpr(state LoweringState*, expression nt.Expr*) !$str:
     match expression as value:
+    case nt.Expr.Zero:
+        ret try strings.copy("zeroinitializer")
     case nt.Expr.Literal:
         match value.literal as literal:
         case nt.Literal.Number:
@@ -1644,6 +1682,16 @@ emitExpr(state LoweringState*, expression nt.Expr*) !$str:
         else:
             throw "LLVM value lowering currently supports variables, arguments, and functions"
         ..
+    case nt.Expr.EnumVariant:
+        if value.decl == none:
+            throw "unresolved enum variant reached LLVM lowering"
+        ..
+        ret try enumVariantValue(value.decl)
+    case nt.Expr.InferredStructConstructor:
+        if value.decl == none:
+            throw "unresolved inferred struct constructor reached LLVM lowering"
+        ..
+        ret try emitStructConstructor(state, value.type, value.decl, value.args)
     case nt.Expr.MemberAccess:
         memberNode := nt.loadExpressionNode(value.member)
         match addrof memberNode as memberValue:
@@ -1866,6 +1914,15 @@ emitExpr(state LoweringState*, expression nt.Expr*) !$str:
         defer endLabel.free()
         throwingTypeName := try typeName(callType)
         defer throwingTypeName.free()
+        try state.output.appendBorrowed("  store ")
+        try state.output.appendCopy(loweredInnerType)
+        try state.output.appendBorrowed(" zeroinitializer, ptr %slot")
+        try state.output.appendCopy(valueSlot)
+        try state.output.appendBorrowed("\n  store ")
+        try state.output.appendCopy(loweredErrorType)
+        try state.output.appendBorrowed(" zeroinitializer, ptr %slot")
+        try state.output.appendCopy(errorSlot)
+        try state.output.appendBorrowed("\n")
         try state.output.appendBorrowed("  %v")
         try state.output.appendCopy(errorValueId)
         try state.output.appendBorrowed(" = extractvalue ")
@@ -1981,22 +2038,27 @@ emitExpr(state LoweringState*, expression nt.Expr*) !$str:
         secondId := try strconv.formatUint(state.nextValue)
         defer secondId.free()
         state.nextValue = state.nextValue + 1
+        namespace := try strconv.formatUint(state.traceNamespaceHash)
+        defer namespace.free()
+        embedPrefix := try strings.concat(".magma.embed.", namespace)
+        defer embedPrefix.free()
+        embedSuffix := try strings.concat(".", storageId)
+        defer embedSuffix.free()
+        embedName := try strings.concat(embedPrefix, embedSuffix)
+        defer embedName.free()
+        try state.traceGlobals.appendBorrowed("@")
+        try state.traceGlobals.appendCopy(embedName)
+        try state.traceGlobals.appendBorrowed(" = private unnamed_addr constant [")
+        try state.traceGlobals.appendCopy(arrayLength)
+        try state.traceGlobals.appendBorrowed(" x i8] c\"")
+        try appendLLVMBytes(state.traceGlobals, content)
+        try state.traceGlobals.appendBorrowed("\\00\", align 1\n")
         try state.output.appendBorrowed("  %v")
-        try state.output.appendCopy(storageId)
-        try state.output.appendBorrowed(" = alloca [")
-        try state.output.appendCopy(arrayLength)
-        try state.output.appendBorrowed(" x i8], align 1\n  store [")
-        try state.output.appendCopy(arrayLength)
-        try state.output.appendBorrowed(" x i8] c\"")
-        try appendLLVMBytes(state.output, content)
-        try state.output.appendBorrowed("\\00\", ptr %v")
-        try state.output.appendCopy(storageId)
-        try state.output.appendBorrowed("\n  %v")
         try state.output.appendCopy(pointerId)
         try state.output.appendBorrowed(" = getelementptr inbounds [")
         try state.output.appendCopy(arrayLength)
-        try state.output.appendBorrowed(" x i8], ptr %v")
-        try state.output.appendCopy(storageId)
+        try state.output.appendBorrowed(" x i8], ptr @")
+        try state.output.appendCopy(embedName)
         try state.output.appendBorrowed(", i64 0, i64 0\n  %v")
         try state.output.appendCopy(firstId)
         try state.output.appendBorrowed(" = insertvalue %type.str zeroinitializer, ptr %v")
@@ -2961,10 +3023,7 @@ emitLValuePointer(state LoweringState*, expression nt.Expr*) !$str:
                 slot := try strconv.formatUint(state.nextValue)
                 defer slot.free()
                 state.nextValue = state.nextValue + 1
-                try state.output.appendBorrowed("  %tmp.slot")
-                try state.output.appendCopy(slot)
-                try state.output.appendBorrowed(" = alloca ")
-                try state.output.appendCopy(slotType)
+                try appendEntryAlloca(state, "%tmp.slot", slot, slotType, "", "")
                 try state.output.appendBorrowed("\n  store ")
                 try state.output.appendCopy(slotType)
                 try state.output.appendBorrowed(" ")
@@ -3158,18 +3217,32 @@ lowerArrayLength(state LoweringState*, array nt.Expr.Array*, args nt.NodeArray[n
 emitArrayConstructor(state LoweringState*, array nt.Expr.Array*, args nt.NodeArray[nt.Expr*]) !$str:
     elementType := try loweredTypeName(state, array.type)
     defer elementType.free()
+    fixedLength := array.inferLength
+    if fixedLength == false && array.length != none:
+        lengthExpression := nt.loadExpressionNode(array.length)
+        match addrof lengthExpression as lengthKind:
+        case nt.Expr.Literal:
+            fixedLength = true
+        else:
+            fixedLength = false
+        ..
+    ..
     lengthValue := try lowerArrayLength(state, array, args)
     defer lengthValue.free()
     storageId := try strconv.formatUint(state.nextValue)
     defer storageId.free()
     state.nextValue = state.nextValue + 1
-    try state.output.appendBorrowed("  %v")
-    try state.output.appendCopy(storageId)
-    try state.output.appendBorrowed(" = alloca ")
-    try state.output.appendCopy(elementType)
-    try state.output.appendBorrowed(", i64 ")
-    try state.output.appendCopy(lengthValue)
-    try state.output.appendBorrowed("\n")
+    if fixedLength:
+        try appendEntryAlloca(state, "%v", storageId, elementType, lengthValue, "")
+    else:
+        try state.output.appendBorrowed("  %v")
+        try state.output.appendCopy(storageId)
+        try state.output.appendBorrowed(" = alloca ")
+        try state.output.appendCopy(elementType)
+        try state.output.appendBorrowed(", i64 ")
+        try state.output.appendCopy(lengthValue)
+        try state.output.appendBorrowed("\n")
+    ..
     endPointerId := try strconv.formatUint(state.nextValue)
     defer endPointerId.free()
     state.nextValue = state.nextValue + 1
@@ -3433,11 +3506,8 @@ emitProtoMethodCall(state LoweringState*, callOwner nt.Expr*, returnType nt.Type
                 protoSlotPointer := try strings.copy(protoStorage)
                 defer protoSlotPointer.free()
                 if hasProtoStorage:
-                    try state.output.appendBorrowed("  %v")
-                    try state.output.appendCopy(protoSlotId)
-                    try state.output.appendBorrowed(" = alloca ")
-                    try state.output.appendCopy(protoTypeName)
-                    try state.output.appendBorrowed("\n  store ")
+                    try appendEntryAlloca(state, "%v", protoSlotId, protoTypeName, "", "")
+                    try state.output.appendBorrowed("  store ")
                     try state.output.appendCopy(protoTypeName)
                     try state.output.appendBorrowed(" ")
                     try state.output.appendCopy(protoValue)
@@ -3631,10 +3701,7 @@ emitStaticMethodCall(state LoweringState*, callOwner nt.Expr*, returnType nt.Typ
                         slot := try strconv.formatUint(state.nextValue)
                         defer slot.free()
                         state.nextValue = state.nextValue + 1
-                        try state.output.appendBorrowed("  %tmp.slot")
-                        try state.output.appendCopy(slot)
-                        try state.output.appendBorrowed(" = alloca ")
-                        try state.output.appendCopy(receiverLlvmType)
+                        try appendEntryAlloca(state, "%tmp.slot", slot, receiverLlvmType, "", "")
                         try state.output.appendBorrowed("\n  store ")
                         try state.output.appendCopy(receiverLlvmType)
                         try state.output.appendBorrowed(" ")
@@ -3764,11 +3831,8 @@ emitProtoImplementation(state LoweringState*, callExpression nt.Expr*, resultTyp
             storageId := try strconv.formatUint(state.nextValue)
             defer storageId.free()
             state.nextValue = state.nextValue + 1
-            try state.output.appendBorrowed("  %v")
-            try state.output.appendCopy(storageId)
-            try state.output.appendBorrowed(" = alloca ")
-            try state.output.appendCopy(sourceTypeName)
-            try state.output.appendBorrowed("\n  store ")
+            try appendEntryAlloca(state, "%v", storageId, sourceTypeName, "", "")
+            try state.output.appendBorrowed("  store ")
             try state.output.appendCopy(sourceTypeName)
             try state.output.appendBorrowed(" ")
             try state.output.appendCopy(aggregateValue)
@@ -3909,10 +3973,7 @@ emitProtoView(state LoweringState*, callExpression nt.Expr*, viewType nt.Type*, 
                 storageId := try strconv.formatUint(state.nextValue)
                 defer storageId.free()
                 state.nextValue = state.nextValue + 1
-                try state.output.appendBorrowed("  %v")
-                try state.output.appendCopy(storageId)
-                try state.output.appendBorrowed(" = alloca ")
-                try state.output.appendCopy(receiverTypeName)
+                try appendEntryAlloca(state, "%v", storageId, receiverTypeName, "", "")
                 try state.output.appendBorrowed("\n  store ")
                 try state.output.appendCopy(receiverTypeName)
                 try state.output.appendBorrowed(" ")
@@ -3954,11 +4015,8 @@ emitProtoView(state LoweringState*, callExpression nt.Expr*, viewType nt.Type*, 
             viewValueId := try strconv.formatUint(state.nextValue + 5)
             defer viewValueId.free()
             state.nextValue = state.nextValue + 6
-            try state.output.appendBorrowed("  %v")
-            try state.output.appendCopy(viewSlotId)
-            try state.output.appendBorrowed(" = alloca ")
-            try state.output.appendCopy(viewTypeName)
-            try state.output.appendBorrowed("\n  store ")
+            try appendEntryAlloca(state, "%v", viewSlotId, viewTypeName, "", "")
+            try state.output.appendBorrowed("  store ")
             try state.output.appendCopy(viewTypeName)
             try state.output.appendBorrowed(" zeroinitializer, ptr %v")
             try state.output.appendCopy(viewSlotId)
@@ -4215,11 +4273,8 @@ emitUnionVariantConstructor(state LoweringState*, resultType nt.Type*, declarati
     state.nextValue = state.nextValue + 1
     tag := try strconv.formatUint(info.tag)
     defer tag.free()
+    try appendEntryAlloca(state, "%v", storageId, unionType, "", "")
     try state.output.appendBorrowed("  %v")
-    try state.output.appendCopy(storageId)
-    try state.output.appendBorrowed(" = alloca ")
-    try state.output.appendCopy(unionType)
-    try state.output.appendBorrowed("\n  %v")
     try state.output.appendCopy(tagPointerId)
     try state.output.appendBorrowed(" = getelementptr ")
     try state.output.appendCopy(unionType)
@@ -5533,10 +5588,7 @@ emitMatch(state LoweringState*, value nt.Stmt.Match*) !bool:
             slot := try strconv.formatUint(state.nextValue)
             defer slot.free()
             state.nextValue = state.nextValue + 1
-            try state.output.appendBorrowed("  %tmp.slot")
-            try state.output.appendCopy(slot)
-            try state.output.appendBorrowed(" = alloca ")
-            try state.output.appendCopy(ownerLlvmType)
+            try appendEntryAlloca(state, "%tmp.slot", slot, ownerLlvmType, "", "")
             try state.output.appendBorrowed("\n  store ")
             try state.output.appendCopy(ownerLlvmType)
             try state.output.appendBorrowed(" ")
@@ -5799,6 +5851,12 @@ emitFunction(out builder.Builder*, declaration dclr.Decl*, returnType nt.Type*, 
     symbolForTrace := try declarationLinkName(declaration)
     defer symbolForTrace.free()
     try appendFunctionSignature(out, declaration, returnType, true)
+    entryAllocas := try builder.new()
+    defer entryAllocas.free()
+    entryInitializers := try builder.new()
+    defer entryInitializers.free()
+    entryValueInitializers := try builder.new()
+    defer entryValueInitializers.free()
     receiver := try methodReceiver(declaration)
     if receiver != none:
         receiverType nt.Type* = none
@@ -5814,17 +5872,14 @@ emitFunction(out builder.Builder*, declaration dclr.Decl*, returnType nt.Type*, 
         defer id.free()
         argumentType := try typeName(receiverType)
         defer argumentType.free()
-        try out.appendBorrowed("  %slot")
-        try out.appendCopy(id)
-        try out.appendBorrowed(" = alloca ")
-        try out.appendCopy(argumentType)
-        try out.appendBorrowed("\n  store ")
-        try out.appendCopy(argumentType)
-        try out.appendBorrowed(" %arg")
-        try out.appendCopy(id)
-        try out.appendBorrowed(", ptr %slot")
-        try out.appendCopy(id)
-        try out.appendBorrowed("\n")
+        try appendAlloca(addrof entryAllocas, "%slot", id, argumentType, "", "")
+        try entryValueInitializers.appendBorrowed("  store ")
+        try entryValueInitializers.appendCopy(argumentType)
+        try entryValueInitializers.appendBorrowed(" %arg")
+        try entryValueInitializers.appendCopy(id)
+        try entryValueInitializers.appendBorrowed(", ptr %slot")
+        try entryValueInitializers.appendCopy(id)
+        try entryValueInitializers.appendBorrowed("\n")
     ..
     match declaration.kind as functionKind:
     case dclr.DeclKind.Function:
@@ -5836,17 +5891,14 @@ emitFunction(out builder.Builder*, declaration dclr.Decl*, returnType nt.Type*, 
                 defer id.free()
                 argumentType := try typeName(argumentKind.type)
                 defer argumentType.free()
-                try out.appendBorrowed("  %slot")
-                try out.appendCopy(id)
-                try out.appendBorrowed(" = alloca ")
-                try out.appendCopy(argumentType)
-                try out.appendBorrowed("\n  store ")
-                try out.appendCopy(argumentType)
-                try out.appendBorrowed(" %arg")
-                try out.appendCopy(id)
-                try out.appendBorrowed(", ptr %slot")
-                try out.appendCopy(id)
-                try out.appendBorrowed("\n")
+                try appendAlloca(addrof entryAllocas, "%slot", id, argumentType, "", "")
+                try entryValueInitializers.appendBorrowed("  store ")
+                try entryValueInitializers.appendCopy(argumentType)
+                try entryValueInitializers.appendBorrowed(" %arg")
+                try entryValueInitializers.appendCopy(id)
+                try entryValueInitializers.appendBorrowed(", ptr %slot")
+                try entryValueInitializers.appendCopy(id)
+                try entryValueInitializers.appendBorrowed("\n")
             else:
                 throw "function argument is not an argument declaration"
             ..
@@ -5855,12 +5907,14 @@ emitFunction(out builder.Builder*, declaration dclr.Decl*, returnType nt.Type*, 
         throw "function definition has no function declaration"
     ..
     hasContext := not (try declarationNoContext(declaration))
-    localContextId := try appendFunctionContextSlot(out, declaration, hasContext)
+    localContextId := try appendFunctionContextSlot(addrof entryAllocas, addrof entryInitializers, declaration, hasContext)
     traceFunction := try sourceFunctionName(declaration)
     defer traceFunction.free()
     traceGlobals := try builder.new()
     defer traceGlobals.free()
-    state := LoweringState(output=out, returnType=returnType, nextValue=0, nextBlock=0, breakTarget="", continueTarget="", deferFrame=none, loopDeferBoundary=none, hasContext=hasContext, hasLocalContext=localContextId != 0, localContextId=localContextId, currentBlock=try strings.copy("entry"), matchBindings=none, genericTypeArgs=nt.emptyTypeArray(), genericTypeParams=dclr.emptyDeclArray(), tryContextDepth=0, tracePushSymbol=tracePushSymbol, traceFunction=try strings.copy(traceFunction), traceFile=declaration.module.path, traceNamespaceHash=hash.string(symbolForTrace), traceGlobals=addrof traceGlobals, nextTraceSite=0)
+    bodyOutput := try builder.new()
+    defer bodyOutput.free()
+    state := LoweringState(output=addrof bodyOutput, entryAllocas=addrof entryAllocas, entryInitializers=addrof entryInitializers, entryValueInitializers=addrof entryValueInitializers, returnType=returnType, nextValue=0, nextBlock=0, breakTarget="", continueTarget="", deferFrame=none, loopDeferBoundary=none, hasContext=hasContext, hasLocalContext=localContextId != 0, localContextId=localContextId, currentBlock=try strings.copy("entry"), matchBindings=none, genericTypeArgs=nt.emptyTypeArray(), genericTypeParams=dclr.emptyDeclArray(), tryContextDepth=0, tracePushSymbol=tracePushSymbol, traceFunction=try strings.copy(traceFunction), traceFile=declaration.module.path, traceNamespaceHash=hash.string(symbolForTrace), traceGlobals=addrof traceGlobals, nextTraceSite=0)
     loopSlots := try newLoopSlotList()
     defer loopSlots.free()
     try emitForLoopIndexAllocas(addrof state, body, addrof loopSlots)
@@ -5869,15 +5923,27 @@ emitFunction(out builder.Builder*, declaration dclr.Decl*, returnType nt.Type*, 
         resultType := try typeName(returnType)
         defer resultType.free()
         if isThrowingType(returnType):
-            try out.appendBorrowed("  ret ")
-            try out.appendCopy(resultType)
-            try out.appendBorrowed(" zeroinitializer\n")
+            try state.output.appendBorrowed("  ret ")
+            try state.output.appendCopy(resultType)
+            try state.output.appendBorrowed(" zeroinitializer\n")
         elif strings.compare(resultType, "void"):
-            try out.appendBorrowed("  ret void\n")
+            try state.output.appendBorrowed("  ret void\n")
         else:
             throw try strings.concat("non-void function body does not end in a lowered return: ", symbolForTrace)
         ..
     ..
+    entryAllocaText := try entryAllocas.build()
+    defer entryAllocaText.free()
+    entryInitializerText := try entryInitializers.build()
+    defer entryInitializerText.free()
+    entryValueInitializerText := try entryValueInitializers.build()
+    defer entryValueInitializerText.free()
+    bodyText := try bodyOutput.build()
+    defer bodyText.free()
+    try out.appendCopy(entryAllocaText)
+    try out.appendCopy(entryInitializerText)
+    try out.appendCopy(entryValueInitializerText)
+    try out.appendCopy(bodyText)
     try out.appendBorrowed("}\n")
     traceGlobalsText := try traceGlobals.build()
     defer traceGlobalsText.free()
@@ -5971,6 +6037,12 @@ emitSpecializedFunction(out builder.Builder*, specialization nt.Specialization*,
     symbol := try specializationSymbol(specialization.template, specialization.typeArgs)
     defer symbol.free()
     try appendSpecializedSignature(out, specialization, symbol, true)
+    entryAllocas := try builder.new()
+    defer entryAllocas.free()
+    entryInitializers := try builder.new()
+    defer entryInitializers.free()
+    entryValueInitializers := try builder.new()
+    defer entryValueInitializers.free()
     receiver := try methodReceiver(specialization.template)
     if receiver != none:
         receiverType nt.Type* = none
@@ -5986,17 +6058,14 @@ emitSpecializedFunction(out builder.Builder*, specialization nt.Specialization*,
         defer id.free()
         lowered := try typeName(receiverType)
         defer lowered.free()
-        try out.appendBorrowed("  %slot")
-        try out.appendCopy(id)
-        try out.appendBorrowed(" = alloca ")
-        try out.appendCopy(lowered)
-        try out.appendBorrowed("\n  store ")
-        try out.appendCopy(lowered)
-        try out.appendBorrowed(" %arg")
-        try out.appendCopy(id)
-        try out.appendBorrowed(", ptr %slot")
-        try out.appendCopy(id)
-        try out.appendBorrowed("\n")
+        try appendAlloca(addrof entryAllocas, "%slot", id, lowered, "", "")
+        try entryValueInitializers.appendBorrowed("  store ")
+        try entryValueInitializers.appendCopy(lowered)
+        try entryValueInitializers.appendBorrowed(" %arg")
+        try entryValueInitializers.appendCopy(id)
+        try entryValueInitializers.appendBorrowed(", ptr %slot")
+        try entryValueInitializers.appendCopy(id)
+        try entryValueInitializers.appendBorrowed("\n")
     ..
     for i := 0 to specialization.concreteHeader.fields.count():
         fieldPtr := try specialization.concreteHeader.fields.get(i)
@@ -6007,17 +6076,14 @@ emitSpecializedFunction(out builder.Builder*, specialization nt.Specialization*,
             defer id.free()
             lowered := try typeName(argument.type)
             defer lowered.free()
-            try out.appendBorrowed("  %slot")
-            try out.appendCopy(id)
-            try out.appendBorrowed(" = alloca ")
-            try out.appendCopy(lowered)
-            try out.appendBorrowed("\n  store ")
-            try out.appendCopy(lowered)
-            try out.appendBorrowed(" %arg")
-            try out.appendCopy(id)
-            try out.appendBorrowed(", ptr %slot")
-            try out.appendCopy(id)
-            try out.appendBorrowed("\n")
+            try appendAlloca(addrof entryAllocas, "%slot", id, lowered, "", "")
+            try entryValueInitializers.appendBorrowed("  store ")
+            try entryValueInitializers.appendCopy(lowered)
+            try entryValueInitializers.appendBorrowed(" %arg")
+            try entryValueInitializers.appendCopy(id)
+            try entryValueInitializers.appendBorrowed(", ptr %slot")
+            try entryValueInitializers.appendCopy(id)
+            try entryValueInitializers.appendBorrowed("\n")
         else:
             throw "specialized function argument is not a variable"
         ..
@@ -6028,31 +6094,45 @@ emitSpecializedFunction(out builder.Builder*, specialization nt.Specialization*,
     match addrof functionType as signature:
     case nt.Type.Function:
         hasContext := not (try declarationNoContext(specialization.template))
-        localContextId := try appendFunctionContextSlot(out, specialization.template, hasContext)
+        localContextId := try appendFunctionContextSlot(addrof entryAllocas, addrof entryInitializers, specialization.template, hasContext)
         traceFunction := try sourceFunctionName(specialization.template)
         defer traceFunction.free()
-        state := LoweringState(output=out, returnType=signature.returnType, nextValue=0, nextBlock=0, breakTarget="", continueTarget="", deferFrame=none, loopDeferBoundary=none, hasContext=hasContext, hasLocalContext=localContextId != 0, localContextId=localContextId, currentBlock=try strings.copy("entry"), matchBindings=none, genericTypeArgs=specialization.typeArgs, genericTypeParams=try specializationParameters(specialization), tryContextDepth=0, tracePushSymbol=tracePushSymbol, traceFunction=try strings.copy(traceFunction), traceFile=specialization.template.module.path, traceNamespaceHash=hash.string(symbol), traceGlobals=addrof traceGlobals, nextTraceSite=0)
+        bodyOutput := try builder.new()
+        defer bodyOutput.free()
+        state := LoweringState(output=addrof bodyOutput, entryAllocas=addrof entryAllocas, entryInitializers=addrof entryInitializers, entryValueInitializers=addrof entryValueInitializers, returnType=signature.returnType, nextValue=0, nextBlock=0, breakTarget="", continueTarget="", deferFrame=none, loopDeferBoundary=none, hasContext=hasContext, hasLocalContext=localContextId != 0, localContextId=localContextId, currentBlock=try strings.copy("entry"), matchBindings=none, genericTypeArgs=specialization.typeArgs, genericTypeParams=try specializationParameters(specialization), tryContextDepth=0, tracePushSymbol=tracePushSymbol, traceFunction=try strings.copy(traceFunction), traceFile=specialization.template.module.path, traceNamespaceHash=hash.string(symbol), traceGlobals=addrof traceGlobals, nextTraceSite=0)
         loopSlots := try newLoopSlotList()
         defer loopSlots.free()
         try emitForLoopIndexAllocas(addrof state, specialization.concreteBody, addrof loopSlots)
         terminated := try emitStatement(addrof state, specialization.concreteBody)
         if not terminated:
             if try isVoidType(signature.returnType):
-                try out.appendBorrowed("  ret void\n")
+                try state.output.appendBorrowed("  ret void\n")
             elif isThrowingType(signature.returnType):
                 lowered := try typeName(signature.returnType)
                 defer lowered.free()
-                try out.appendBorrowed("  ret ")
-                try out.appendCopy(lowered)
-                try out.appendBorrowed(" zeroinitializer\n")
+                try state.output.appendBorrowed("  ret ")
+                try state.output.appendCopy(lowered)
+                try state.output.appendBorrowed(" zeroinitializer\n")
             else:
                 throw "specialized non-void function does not return a value"
             ..
         ..
+        entryAllocaText := try entryAllocas.build()
+        defer entryAllocaText.free()
+        entryInitializerText := try entryInitializers.build()
+        defer entryInitializerText.free()
+        entryValueInitializerText := try entryValueInitializers.build()
+        defer entryValueInitializerText.free()
+        bodyText := try bodyOutput.build()
+        defer bodyText.free()
+        try out.appendCopy(entryAllocaText)
+        try out.appendCopy(entryInitializerText)
+        try out.appendCopy(entryValueInitializerText)
+        try out.appendCopy(bodyText)
+        try out.appendBorrowed("}\n")
     else:
         throw "specialized function has a non-function type"
     ..
-    try out.appendBorrowed("}\n")
     traceGlobalsText := try traceGlobals.build()
     defer traceGlobalsText.free()
     try out.appendCopy(traceGlobalsText)
@@ -6806,6 +6886,8 @@ emitGlobal(out builder.Builder*, declaration dclr.Decl*, variableType nt.Type*, 
     else:
         initializer := nt.loadExpressionNode(initializerExpr)
         match addrof initializer as initialValue:
+        case nt.Expr.Zero:
+            try out.appendBorrowed("zeroinitializer")
         case nt.Expr.Named:
             match initialValue.decl.kind as declarationKind:
             case dclr.DeclKind.Variable:

@@ -1,6 +1,9 @@
 mod link_checker
+
 # Links parsed names to declarations and checks the complete parsed import
 # graph before specialization work is drained.
+# @author devan - Overall architecture
+# @author codex (GPT6 Luna) - Completion, fixes
 
 use "std:strings" strgs
 use "std:path" path
@@ -222,8 +225,18 @@ cloneExpression(c Checker*, source nt.Expr*) !nt.Expr*:
         ret try makeNodeExpression(c, nt.Expr.Empty())
     case nt.Expr.Literal:
         ret try makeNodeExpression(c, nt.Expr.Literal(type=try cloneType(c, value.type), literal=try cloneLiteral(c, value.literal)))
+    case nt.Expr.Zero:
+        ret try makeNodeExpression(c, nt.Expr.Zero(type=try cloneType(c, value.type), sourcePos=value.sourcePos))
     case nt.Expr.Named:
         ret try makeNodeExpression(c, nt.Expr.Named(type=try cloneType(c, value.type), name=value.name, decl=value.decl, category=value.category, sourcePos=value.sourcePos))
+    case nt.Expr.EnumVariant:
+        ret try makeNodeExpression(c, nt.Expr.EnumVariant(type=try cloneType(c, value.type), name=value.name, decl=value.decl, sourcePos=value.sourcePos))
+    case nt.Expr.InferredStructConstructor:
+        arguments := nt.emptyExpressionArray()
+        for i := 0 to value.args.count():
+            try arguments.pushRight(ctx.alloc, try cloneExpression(c, value.args.get(i)))
+        ..
+        ret try makeNodeExpression(c, nt.Expr.InferredStructConstructor(type=try cloneType(c, value.type), decl=value.decl, args=move arguments, sourcePos=value.sourcePos))
     case nt.Expr.MemberAccess:
         ret try makeNodeExpression(c, nt.Expr.MemberAccess(type=try cloneType(c, value.type), owner=try cloneExpression(c, value.owner), member=try cloneExpression(c, value.member), category=value.category, isProtoMethod=value.isProtoMethod))
     case nt.Expr.Subscript:
@@ -696,6 +709,15 @@ checkVisibleInModule(c Checker*, declaration dclr.Decl*, accessingModule dclr.Mo
         ret
     ..
     match declaration.kind as member:
+    case dclr.DeclKind.EnumVariant:
+        match member.type as variantType:
+        case nt.Type.Named:
+            if variantType.decl != none && variantType.decl.isPublic:
+                ret
+            ..
+        else:
+            declaration = declaration
+        ..
     case dclr.DeclKind.Function:
         ownerEnd, ownerEndErr := strgs.findByte(member.name, 46)
         if ownerEndErr.ok():
@@ -721,6 +743,16 @@ checkVisibleInModule(c Checker*, declaration dclr.Decl*, accessingModule dclr.Mo
 
 checkVisible(c Checker*, declaration dclr.Decl*) !void:
     try checkVisibleInModule(c, declaration, c.module)
+..
+
+checkVisibleAt(c Checker*, declaration dclr.Decl*, position org.FilePos) !void:
+    failure := checkVisible(c, declaration)
+    if failure.nok():
+        c.failurePos = position
+        c.hasFailurePos = true
+        c.hasCallDiagnostic = false
+        throw failure
+    ..
 ..
 
 resolveCompositeName(c Checker*, name nt.Name.Composite*, scope dclr.Scope*) !dclr.Decl*:
@@ -1707,6 +1739,153 @@ typeDeclaration(c Checker*, type nt.Type*) !dclr.Decl*:
     throw "type has no declaration"
 ..
 
+enumVariantMessage(name str, prefix str, suffix str) !$str:
+    start := try strgs.concat(prefix, name)
+    defer start.free()
+    ret try strgs.concat(start, suffix)
+..
+
+isContextualExpression(expression nt.Expr*) bool:
+    if expression == none:
+        ret false
+    ..
+    match expression as value:
+    case nt.Expr.Zero:
+        ret true
+    case nt.Expr.EnumVariant:
+        ret true
+    case nt.Expr.InferredStructConstructor:
+        ret true
+    else:
+        ret false
+    ..
+..
+
+checkExpressionWithExpectedType(c Checker*, expression nt.Expr*, expectedType nt.Type*, scope dclr.Scope*) !nt.Type*:
+    match expression as value:
+    case nt.Expr.Zero:
+        if expectedType == none:
+            c.failurePos = value.sourcePos
+            c.hasFailurePos = true
+            c.hasCallDiagnostic = false
+            throw "zero requires an expected value type"
+        ..
+        expectedType = try substituteType(c, expectedType)
+        if isVoidType(expectedType) || isThrowingType(expectedType):
+            c.failurePos = value.sourcePos
+            c.hasFailurePos = true
+            c.hasCallDiagnostic = false
+            throw "zero requires a storable value type"
+        ..
+        value.type = expectedType
+        ret value.type
+    case nt.Expr.EnumVariant:
+        if expectedType != none:
+            expectedType = try substituteType(c, expectedType)
+        ..
+        if expectedType == none:
+            c.failurePos = value.sourcePos
+            c.hasFailurePos = true
+            c.hasCallDiagnostic = false
+            throw try enumVariantMessage(value.name, "enum variant .", " requires an expected enum type")
+        ..
+        canonicalExpectedType := try canonicalType(expectedType, 0)
+        enumDeclaration dclr.Decl* = none
+        match canonicalExpectedType as canonicalEnumType:
+        case nt.Type.Named:
+            if canonicalEnumType.decl != none:
+                match canonicalEnumType.decl.kind as declarationKind:
+                case dclr.DeclKind.Enum:
+                    enumDeclaration = canonicalEnumType.decl
+                else:
+                    c.failurePos = value.sourcePos
+                    c.hasFailurePos = true
+                    c.hasCallDiagnostic = false
+                    throw try enumVariantMessage(value.name, "enum variant .", " requires an enum type")
+                ..
+            else:
+                c.failurePos = value.sourcePos
+                c.hasFailurePos = true
+                c.hasCallDiagnostic = false
+                throw try enumVariantMessage(value.name, "enum variant .", " requires an enum type")
+            ..
+        else:
+            c.failurePos = value.sourcePos
+            c.hasFailurePos = true
+            c.hasCallDiagnostic = false
+            throw try enumVariantMessage(value.name, "enum variant .", " requires an enum type")
+        ..
+        variant := try enumDeclaration.access(value.name)
+        match variant.kind as variantKind:
+        case dclr.DeclKind.EnumVariant:
+            try checkVisibleAt(c, variant, value.sourcePos)
+            value.decl = variant
+            value.type = expectedType
+            ret value.type
+        else:
+            throw try enumVariantMessage(value.name, ".", " is not an enum variant")
+        ..
+    case nt.Expr.InferredStructConstructor:
+        if expectedType == none:
+            throw "inferred struct constructor requires an expected struct type"
+        ..
+        expectedType = try substituteType(c, expectedType)
+        canonicalExpectedType := try canonicalType(expectedType, 0)
+        canonicalExpectedType = try canonicalType(stripOwnedType(canonicalExpectedType), 0)
+        isStructShape := false
+        match canonicalExpectedType as shape:
+        case nt.Type.Named:
+            isStructShape = true
+        case nt.Type.Templated:
+            isStructShape = true
+        else:
+            isStructShape = false
+        ..
+        if not isStructShape:
+            throw "inferred constructor requires a struct type"
+        ..
+        structure := try typeDeclaration(c, canonicalExpectedType)
+        isStructDeclaration := false
+        match structure.kind as structureKind:
+        case dclr.DeclKind.Struct:
+            isStructDeclaration = true
+        else:
+            isStructDeclaration = false
+        ..
+        if not isStructDeclaration:
+            throw "inferred constructor requires a struct type"
+        ..
+        for i := 0 to value.args.count():
+            argument := try value.args.get(i)
+            hasNamedField := false
+            match argument as namedArgument:
+            case nt.Expr.Assign:
+                match namedArgument.assignee as fieldName:
+                case nt.Expr.Named:
+                    hasNamedField = true
+                else:
+                    hasNamedField = false
+                ..
+            else:
+                hasNamedField = false
+            ..
+            if not hasNamedField:
+                throw "inferred struct constructor requires named field initializers"
+            ..
+        ..
+        bindingCount := c.bindingParams.count()
+        defer restoreBindingCount(c, bindingCount)
+        try bindMemberOwnerType(c, expectedType)
+        try checkStructConstructorArgs(c, structure, value.args, scope)
+        value.decl = structure
+        value.type = expectedType
+        ret value.type
+    else:
+        ret try checkExpression(c, expression, scope)
+    ..
+    throw "expression could not be checked against its expected type"
+..
+
 boundType(c Checker*, parameter dclr.Decl*) !nt.Type*:
     for i := 0 to c.bindingParams.count():
         boundParameter := try c.bindingParams.get(i)
@@ -2341,6 +2520,18 @@ checkExpression(c Checker*, expression nt.Expr*, scope dclr.Scope*) !nt.Type*:
             value.category = nt.ValueCategory.Value
         ..
         ret value.type
+    case nt.Expr.Zero:
+        c.failurePos = value.sourcePos
+        c.hasFailurePos = true
+        c.hasCallDiagnostic = false
+        throw "zero requires an expected value type"
+    case nt.Expr.EnumVariant:
+        c.failurePos = value.sourcePos
+        c.hasFailurePos = true
+        c.hasCallDiagnostic = false
+        throw try enumVariantMessage(value.name, "enum variant .", " requires an expected enum type")
+    case nt.Expr.InferredStructConstructor:
+        throw "inferred struct constructor requires an expected struct type"
     case nt.Expr.MemberAccess:
         memberName str = ""
         match value.member as member:
@@ -2532,7 +2723,10 @@ checkExpression(c Checker*, expression nt.Expr*, scope dclr.Scope*) !nt.Type*:
         ..
         ret try substituteType(c, value.type)
     case nt.Expr.VarDefAssign:
-        actual := try checkExpression(c, value.assignment, scope)
+        if value.type != none:
+            try checkType(c, value.type, scope, false)
+        ..
+        actual := try checkExpressionWithExpectedType(c, value.assignment, value.type, scope)
         if c.checkingSpecialization:
             actual = try substituteType(c, actual)
         ..
@@ -2544,7 +2738,6 @@ checkExpression(c Checker*, expression nt.Expr*, scope dclr.Scope*) !nt.Type*:
                 resultType = try substituteType(c, actual)
             ..
         else:
-            try checkType(c, value.type, scope, false)
             resultType = try substituteType(c, value.type)
             actual = try applyNumericContext(c, value.assignment, resultType, actual)
             if not (try isCompatible(c, resultType, actual)):
@@ -2635,7 +2828,12 @@ checkExpression(c Checker*, expression nt.Expr*, scope dclr.Scope*) !nt.Type*:
         value.type = try makeSimpleType(c, "u64")
         ret value.type
     case nt.Expr.Unary:
-        operandType := try checkExpression(c, value.operand, scope)
+        operandType nt.Type*
+        if value.op == tkt.KwType.NOT:
+            operandType = try checkExpressionWithExpectedType(c, value.operand, try makeSimpleType(c, "bool"), scope)
+        else:
+            operandType = try checkExpression(c, value.operand, scope)
+        ..
         if value.op == tkt.KwType.MINUS:
             if not isNumericType(operandType):
                 throw "unary minus requires a numeric operand"
@@ -2680,8 +2878,22 @@ checkExpression(c Checker*, expression nt.Expr*, scope dclr.Scope*) !nt.Type*:
         value.type = try checkExpression(c, value.operand, scope)
         ret value.type
     case nt.Expr.Binary:
-        leftType := try checkExpression(c, value.left, scope)
-        rightType := try checkExpression(c, value.right, scope)
+        leftType nt.Type*
+        rightType nt.Type*
+        if value.op == tkt.KwType.ANDAND || value.op == tkt.KwType.OROR:
+            boolType := try makeSimpleType(c, "bool")
+            leftType = try checkExpressionWithExpectedType(c, value.left, boolType, scope)
+            rightType = try checkExpressionWithExpectedType(c, value.right, boolType, scope)
+        elif isContextualExpression(value.left) && not isContextualExpression(value.right):
+            rightType = try checkExpression(c, value.right, scope)
+            leftType = try checkExpressionWithExpectedType(c, value.left, rightType, scope)
+        elif isContextualExpression(value.right) && not isContextualExpression(value.left):
+            leftType = try checkExpression(c, value.left, scope)
+            rightType = try checkExpressionWithExpectedType(c, value.right, leftType, scope)
+        else:
+            leftType = try checkExpression(c, value.left, scope)
+            rightType = try checkExpression(c, value.right, scope)
+        ..
         if value.op == tkt.KwType.PLUS || value.op == tkt.KwType.MINUS || value.op == tkt.KwType.ASTERIX || value.op == tkt.KwType.SLASH || value.op == tkt.KwType.PERCENT:
             if not isNumericType(leftType) || not isNumericType(rightType):
                 throw "arithmetic operators require numeric operands"
@@ -2866,7 +3078,7 @@ checkExpression(c Checker*, expression nt.Expr*, scope dclr.Scope*) !nt.Type*:
             throw "expression is not assignable"
         ..
         try checkAssignmentTarget(c, value.assignee, scope)
-        actualType := try checkExpression(c, value.expr, scope)
+        actualType := try checkExpressionWithExpectedType(c, value.expr, targetType, scope)
         actualType = try applyNumericContext(c, value.expr, targetType, actualType)
         if not (try isCompatible(c, targetType, actualType)):
             try setCallFailureContext(c, value.expr)
@@ -2913,10 +3125,10 @@ checkExpression(c Checker*, expression nt.Expr*, scope dclr.Scope*) !nt.Type*:
                     returned.callKind = resolution.kind
                     returned.target = resolution.target
                 else:
-                    actualType = try checkExpression(c, value.expr, scope)
+                    actualType = try checkExpressionWithExpectedType(c, value.expr, expectedType, scope)
                 ..
             else:
-                actualType = try checkExpression(c, value.expr, scope)
+                actualType = try checkExpressionWithExpectedType(c, value.expr, expectedType, scope)
             ..
             actualType = try applyNumericContext(c, value.expr, expectedType, actualType)
             if not (try isCompatible(c, expectedType, actualType)):
@@ -3098,6 +3310,9 @@ checkCallArgsWithTypes(c Checker*, expected nt.NodeArray[nt.Type*], actual nt.No
         expectedType := try expected.get(i)
         try checkType(c, expectedType, scope, false)
         actualType := try actualTypes.get(i)
+        if actualType == none:
+            actualType = try checkExpressionWithExpectedType(c, actual.get(i), expectedType, scope)
+        ..
         if c.tryDepth != 0 && isThrowingType(actualType):
             match actualType as value:
             case nt.Type.Throwing:
@@ -3116,7 +3331,17 @@ expressionTypes(c Checker*, expressions nt.NodeArray[nt.Expr*], scope dclr.Scope
     types := nt.emptyTypePointerArray()
     try types.reserve(ctx.alloc, expressions.count())
     for i := 0 to expressions.count():
-        try types.pushRight(ctx.alloc, try checkExpression(c, expressions.get(i), scope))
+        expression := try expressions.get(i)
+        match expression as value:
+        case nt.Expr.Zero:
+            try types.pushRight(ctx.alloc, none)
+        case nt.Expr.EnumVariant:
+            try types.pushRight(ctx.alloc, none)
+        case nt.Expr.InferredStructConstructor:
+            try types.pushRight(ctx.alloc, none)
+        else:
+            try types.pushRight(ctx.alloc, try checkExpression(c, expression, scope))
+        ..
     ..
     ret move types
 ..
@@ -3320,6 +3545,9 @@ checkUnionVariantConstructorArgs(c Checker*, declaration dclr.Decl*, arguments n
             field := try variant.fields.get(fieldIndex)
             expected := try typeOfDecl(c, field, scope)
             actual := try actualTypes.get(i)
+            if actual == none:
+                actual = try checkExpressionWithExpectedType(c, actualExpressions.get(i), expected, scope)
+            ..
             actual = try applyNumericContext(c, actualExpressions.get(i), expected, actual)
             if not (try isCompatible(c, expected, actual)):
                 throw "union variant constructor field has an incompatible type"
@@ -3373,6 +3601,9 @@ checkStructConstructorArgsWithTypes(c Checker*, structure dclr.Decl*, arguments 
             expectedType := try substituteType(c, try typeOfDecl(c, field, scope))
             argumentValue := try structArgumentValue(argument)
             actualType := try actualTypes.get(i)
+            if actualType == none:
+                actualType = try checkExpressionWithExpectedType(c, argumentValue, expectedType, scope)
+            ..
             actualType = try applyNumericContext(c, argumentValue, expectedType, actualType)
             if not (try isCompatible(c, expectedType, actualType)):
                 throw "constructor field initializer has an incompatible type"
@@ -3580,7 +3811,9 @@ instantiateGenericCall(c Checker*, declaration dclr.Decl*, arguments nt.NodeArra
                 formal := try callable.args.get(i)
                 formalType := try typeOfDecl(c, formal, scope)
                 actualType := try actualTypes.get(i)
-                try bindTypePattern(c, formalType, actualType, 0)
+                if actualType != none:
+                    try bindTypePattern(c, formalType, actualType, 0)
+                ..
             ..
         case dclr.DeclKind.Struct:
             for i := 0 to arguments.count():
@@ -3588,7 +3821,9 @@ instantiateGenericCall(c Checker*, declaration dclr.Decl*, arguments nt.NodeArra
                 formal := try callable.fields.get(fieldIndex)
                 formalType := try typeOfDecl(c, formal, scope)
                 actualType := try actualTypes.get(i)
-                try bindTypePattern(c, formalType, actualType, 0)
+                if actualType != none:
+                    try bindTypePattern(c, formalType, actualType, 0)
+                ..
             ..
         else:
             throw "declaration is not a generic function or struct"
@@ -4000,6 +4235,8 @@ constantExpression(c Checker*, expression nt.Expr*, depth u64) !bool:
     match expression as value:
     case nt.Expr.Literal:
         ret true
+    case nt.Expr.Zero:
+        ret value.type != none
     case nt.Expr.CompilerKnown:
         ret true
     case nt.Expr.Named:
@@ -4016,6 +4253,23 @@ constantExpression(c Checker*, expression nt.Expr*, depth u64) !bool:
         else:
             ret false
         ..
+    case nt.Expr.EnumVariant:
+        ret value.decl != none
+    case nt.Expr.InferredStructConstructor:
+        for i := 0 to value.args.count():
+            argument := try value.args.get(i)
+            initializer := argument
+            match argument as namedArgument:
+            case nt.Expr.Assign:
+                initializer = namedArgument.expr
+            else:
+                initializer = argument
+            ..
+            if not (try constantExpression(c, initializer, depth + 1)):
+                ret false
+            ..
+        ..
+        ret value.decl != none
     case nt.Expr.DirectCall:
         if value.decl == none:
             ret false
@@ -4245,7 +4499,7 @@ checkVariableDeclaration(c Checker*, declaration dclr.Decl*, scope dclr.Scope*) 
             try checkType(c, value.type, scope, false)
         ..
         if value.initializer != none:
-            initializerType := try checkExpression(c, value.initializer, scope)
+            initializerType := try checkExpressionWithExpectedType(c, value.initializer, resolvedType, scope)
             if value.isConst && not (try constantExpression(c, value.initializer, 0)):
                 throw "constant initializer must be a compile-time constant"
             ..
@@ -4410,7 +4664,7 @@ checkStatement(c Checker*, statement nt.Stmt*, scope dclr.Scope*) !void:
         ..
     case nt.Stmt.Bounded:
         for i := 0 to value.predicates.count():
-            predicateType := try checkExpression(c, value.predicates.get(i), scope)
+            predicateType := try checkExpressionWithExpectedType(c, value.predicates.get(i), try makeSimpleType(c, "bool"), scope)
             if not isBoolType(predicateType):
                 throw "bounded predicates must have bool type"
             ..
@@ -4509,7 +4763,7 @@ checkStatement(c Checker*, statement nt.Stmt*, scope dclr.Scope*) !void:
     case nt.Stmt.LLVM:
         ret
     case nt.Stmt.If:
-        conditionType := try checkExpression(c, value.condition, scope)
+        conditionType := try checkExpressionWithExpectedType(c, value.condition, try makeSimpleType(c, "bool"), scope)
         if not isBoolType(conditionType):
             c.failurePos = value.sourcePos
             c.hasFailurePos = true
@@ -4518,7 +4772,7 @@ checkStatement(c Checker*, statement nt.Stmt*, scope dclr.Scope*) !void:
         try checkBody(c, value.body)
         try checkStatement(c, value.next, scope)
     case nt.Stmt.Elif:
-        conditionType := try checkExpression(c, value.condition, scope)
+        conditionType := try checkExpressionWithExpectedType(c, value.condition, try makeSimpleType(c, "bool"), scope)
         if not isBoolType(conditionType):
             c.failurePos = value.sourcePos
             c.hasFailurePos = true
@@ -4529,7 +4783,7 @@ checkStatement(c Checker*, statement nt.Stmt*, scope dclr.Scope*) !void:
     case nt.Stmt.Else:
         try checkBody(c, value.body)
     case nt.Stmt.Loop:
-        conditionType := try checkExpression(c, value.condition, scope)
+        conditionType := try checkExpressionWithExpectedType(c, value.condition, try makeSimpleType(c, "bool"), scope)
         if not isBoolType(conditionType):
             c.failurePos = value.sourcePos
             c.hasFailurePos = true

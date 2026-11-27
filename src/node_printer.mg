@@ -1,5 +1,8 @@
 mod node_printer
 
+# Used for visual display of the AST
+# @author codex (GPT6 Luna)
+
 use "std:fmt" fmt
 use "std:array" arr
 use "std:io" io
@@ -359,9 +362,22 @@ printExpr(expression nt.Expr*, level u64) !void:
         try writeLine(level, "Expression.Literal")
         try printType(value.type, level + 1)
         try printLiteral(value.literal, level + 1)
+    case nt.Expr.Zero:
+        try writeLine(level, "Expression.Zero")
+        try printType(value.type, level + 1)
     case nt.Expr.Named:
         try writeNamedDeclLine(level, "Expression.Named ", value.name, value.decl)
         try printType(value.type, level + 1)
+    case nt.Expr.EnumVariant:
+        try writeNamedDeclLine(level, "Expression.EnumVariant .", value.name, value.decl)
+        try printType(value.type, level + 1)
+    case nt.Expr.InferredStructConstructor:
+        try writeLine(level, "Expression.InferredStructConstructor")
+        try writeDeclLine(level + 1, "Resolved struct ", value.decl)
+        try printType(value.type, level + 1)
+        for i := 0 to value.args.count():
+            try printExpr(value.args.get(i), level + 1)
+        ..
     case nt.Expr.MemberAccess:
         try writeLine(level, "Expression.MemberAccess")
         try printExpr(value.owner, level + 1)

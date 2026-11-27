@@ -1,5 +1,9 @@
 mod make_absolute
 
+# Used to resolve import paths in magma source files
+# @author devan - Initial architecture
+# @author codex (GPT6 Luna) - fixes
+
 use "std:path" path
 use "std:fs" fs
 use "std:strings" strgs

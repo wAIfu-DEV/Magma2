@@ -130,7 +130,7 @@ pub new(options Options) !$Client:
     connections := try a.allocT[Connection](options.connectionCapacity)
     onerror a.free(connections)
     
-    memory.zero(connections, options.connectionCapacity * sizeof Connection)
+    memory.set(connections, options.connectionCapacity * sizeof Connection, 0)
     guard := adaptive_spinlock.new()
     client Client
     client.allocator = a

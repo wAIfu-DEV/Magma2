@@ -65,14 +65,14 @@ pub new(a allocator.Allocator, capacity u64, commandCapacity u64) !$EventLoop:
     ..
     state State* = try a.allocT[State](1)
     onerror a.free(state)
-    memory.zero(state, sizeof State)
+    memory.set(state, sizeof State, 0)
     nativePoller := try poll.new(a, capacity)
     onerror nativePoller.close()
     events poll.Event* = try a.allocT[poll.Event](capacity)
     onerror a.free(events)
     registrations Registration* = try a.allocT[Registration](capacity)
     onerror a.free(registrations)
-    memory.zero(registrations, capacity * sizeof Registration)
+    memory.set(registrations, capacity * sizeof Registration, 0)
     commands Command* = try a.allocT[Command](commandCapacity)
     onerror a.free(commands)
     state.allocator = a
@@ -151,7 +151,7 @@ removeNow(state State*, token u64) !void:
     ..
     registration Registration* = addrof state.registrations[slot]
     try state.poller.remove(registration.socket)
-      memory.zero(registration, sizeof Registration)
+      memory.set(registration, sizeof Registration, 0)
     ..
 ..
 

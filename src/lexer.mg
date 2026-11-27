@@ -1,5 +1,9 @@
 mod lexer
 
+# Turns source text into tokens. Used for easier and cheaper identificaiton down the line.
+# @author devan
+# @author codex (GPT6 Luna) - fixes
+
 use "std:utf8" utf
 use "std:list" ls
 use "std:memory" mem

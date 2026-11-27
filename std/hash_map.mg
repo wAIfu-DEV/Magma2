@@ -71,7 +71,7 @@ pub new[T](capacity u64, cleanup fn($T) void) !$HashMap[T]:
         throw errors.invalidArgument("hash map capacity must be positive")
     ..
     storage := try a.alloc(try storageSize[T](capacity))
-    memory.zero(statesAt[T](storage, capacity), capacity)
+    memory.set(statesAt[T](storage, capacity), capacity, 0)
     ret HashMap[T](allocator=a, storage=storage, capacity=capacity, length=0, cleanup=cleanup)
 ..
 
@@ -149,7 +149,7 @@ HashMap[T].resize(newCapacity u64) !void:
         keys str* = newStorage
         values T* = valuesAt[T](newStorage, newCapacity)
         states u8* = statesAt[T](newStorage, newCapacity)
-        memory.zero(states, newCapacity)
+        memory.set(states, newCapacity, 0)
         oldKeys str* = keysPtr[T](this)
         oldValues T* = valuesPtr[T](this)
         oldStates u8* = statesPtr[T](this)
